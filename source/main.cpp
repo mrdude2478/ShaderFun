@@ -18,6 +18,8 @@ Right Stick Down: Rescane only music files.
 #include <switch.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_mixer.h>
+#include <SDL2/SDL_image.h>
+#include <SDL2/SDL_ttf.h>
 #include <GLES2/gl2.h>
 #include <stdio.h>
 #include <string>
@@ -32,7 +34,12 @@ Right Stick Down: Rescane only music files.
 #include <unistd.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <algorithm>
+#include <cctype>
 #include "ftp.h"
+#include "scroller.h"
 
 PadState pad;
 HidsysUniquePadId g_unique_pad_ids[2] = { 0 };
@@ -117,86 +124,277 @@ void main() {
 }
 )";
 
-static GLuint compileShader(GLenum type, const char* src) {
+// === Small string helpers ===
+static std::string toLower(std::string s) {
+	std::transform(s.begin(), s.end(), s.begin(),
+		[](unsigned char c) { return (char)std::tolower(c); });
+	return s;
+}
+
+static bool hasExtension(const std::string& name, const char* ext) {
+	std::string n = toLower(name);
+	size_t el = strlen(ext);
+	return n.size() > el && n.compare(n.size() - el, el, ext) == 0;
+}
+
+// === Shader error log (readable over FTP: sdmc:/switch/shaderfun/shader_errors.log) ===
+static void logShaderError(const std::string& label, const std::string& msg) {
+	printf("Shader error in %s:\n%s\n", label.c_str(), msg.c_str());
+	FILE* f = fopen("sdmc:/switch/shaderfun/shader_errors.log", "a");
+	if (f) {
+		fprintf(f, "[%s]\n%s\n\n", label.c_str(), msg.c_str());
+		fclose(f);
+	}
+}
+
+// Returns 0 (and fills errOut) on failure. Never leaks the shader object.
+static GLuint compileShader(GLenum type, const char* src, std::string* errOut = nullptr) {
 	GLuint shader = glCreateShader(type);
 	glShaderSource(shader, 1, &src, NULL);
 	glCompileShader(shader);
 
-	GLint status;
+	GLint status = 0;
 	glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
 	if (!status) {
-		char buffer[1024];
+		char buffer[2048];
 		glGetShaderInfoLog(shader, sizeof(buffer), NULL, buffer);
-		printf("Shader compile error: %s\n", buffer);
+		if (errOut) *errOut = buffer;
+		glDeleteShader(shader);
+		return 0;
 	}
 	return shader;
 }
 
-// === Shader state ===
-struct ShaderProgram {
-	GLuint prog;
-	GLint iResolutionLoc;
-	GLint iTimeLoc;
+// === Image channels (iChannel2 / iChannel3) ===
+// iChannel0 = waveform, iChannel1 = spectrum, iChannel2/3 = images loaded from the SD card.
+struct ImageTex {
+	GLuint id = 0;
+	int w = 1;
+	int h = 1;
+	std::string path;
 };
 
-ShaderProgram loadShaderProgram(const char* fragSrc) {
-	GLuint vs = compileShader(GL_VERTEX_SHADER, vertexShaderSrc);
-	GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragSrc);
+static bool g_scrollerEnabled = false; // B toggles; a shader can force it with //!scroller on|off
 
-	// Check if shaders compiled successfully
-	GLint vsStatus, fsStatus;
-	glGetShaderiv(vs, GL_COMPILE_STATUS, &vsStatus);
-	glGetShaderiv(fs, GL_COMPILE_STATUS, &fsStatus);
+static const int NUM_IMAGE_CHANNELS = 2;
+static ImageTex g_img[NUM_IMAGE_CHANNELS];
+static std::vector<std::string> g_imageFiles;
+static int g_imageIndex = 0;
 
-	if (!vsStatus || !fsStatus) {
-		printf("Shader compilation failed! Using fallback.\n");
-		// Clean up and use fallback
-		if (vs) glDeleteShader(vs);
-		if (fs) glDeleteShader(fs);
-		return loadShaderProgram(fallbackFragmentShader);
+static void setupTextureParams() {
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+static bool loadImageTexture(const std::string& path, ImageTex& out) {
+	if (out.path == path && out.id != 0) return true; // already loaded
+
+	SDL_Surface* surf = IMG_Load(path.c_str());
+	if (!surf) {
+		printf("Failed to load image %s: %s\n", path.c_str(), IMG_GetError());
+		return false;
+	}
+	// Convert to bytes R,G,B,A in memory (what GL_RGBA/GL_UNSIGNED_BYTE expects on little-endian)
+	SDL_Surface* rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
+	SDL_FreeSurface(surf);
+	if (!rgba) {
+		printf("Failed to convert image %s: %s\n", path.c_str(), SDL_GetError());
+		return false;
 	}
 
-	GLuint prog = glCreateProgram();
-	glAttachShader(prog, vs);
-	glAttachShader(prog, fs);
-	glBindAttribLocation(prog, 0, "aPos");
-	glLinkProgram(prog);
-
-	// Check link status
-	GLint linkStatus;
-	glGetProgramiv(prog, GL_LINK_STATUS, &linkStatus);
-	if (!linkStatus) {
-		char buffer[1024];
-		glGetProgramInfoLog(prog, sizeof(buffer), NULL, buffer);
-		printf("Program link error: %s\n", buffer);
-		glDeleteProgram(prog);
-		return loadShaderProgram(fallbackFragmentShader);
+	GLint maxSize = 2048;
+	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxSize);
+	if (rgba->w > maxSize || rgba->h > maxSize) {
+		printf("Image %s too large (%dx%d, max %d)\n", path.c_str(), rgba->w, rgba->h, (int)maxSize);
+		SDL_FreeSurface(rgba);
+		return false;
 	}
 
-	// Clean up shaders after linking
-	glDeleteShader(vs);
-	glDeleteShader(fs);
+	// Flip vertically so uv (0,0) is the bottom-left corner, like Shadertoy.
+	const int rowBytes = rgba->w * 4;
+	std::vector<unsigned char> pixels((size_t)rowBytes * rgba->h);
+	const unsigned char* base = (const unsigned char*)rgba->pixels;
+	for (int y = 0; y < rgba->h; y++) {
+		memcpy(&pixels[(size_t)(rgba->h - 1 - y) * rowBytes], base + (size_t)y * rgba->pitch, rowBytes);
+	}
+
+	if (out.id == 0) glGenTextures(1, &out.id);
+	glBindTexture(GL_TEXTURE_2D, out.id);
+	setupTextureParams();
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+	out.w = rgba->w;
+	out.h = rgba->h;
+	out.path = path;
+	printf("Loaded image %s (%dx%d)\n", path.c_str(), out.w, out.h);
+	SDL_FreeSurface(rgba);
+	return true;
+}
+
+static void scanImageFolderRecursive(const std::string& dirPath, std::vector<std::string>& files) {
+	DIR* dir = opendir(dirPath.c_str());
+	if (!dir) return;
+	struct dirent* ent;
+	while ((ent = readdir(dir)) != NULL) {
+		std::string name = ent->d_name;
+		if (name == "." || name == "..") continue;
+		std::string fullPath = dirPath + "/" + name;
+		if (ent->d_type == DT_DIR) {
+			scanImageFolderRecursive(fullPath, files);
+		}
+		else if (hasExtension(name, ".png") || hasExtension(name, ".jpg") ||
+			hasExtension(name, ".jpeg") || hasExtension(name, ".bmp")) {
+			files.push_back(fullPath);
+		}
+	}
+	closedir(dir);
+}
+
+static void initImageTextures() {
+	g_imageFiles.clear();
+	scanImageFolderRecursive("sdmc:/switch/shaderfun/images", g_imageFiles);
+	if (g_imageFiles.empty()) scanImageFolderRecursive("romfs:/images", g_imageFiles);
+	std::sort(g_imageFiles.begin(), g_imageFiles.end());
+	printf("Found %zu images\n", g_imageFiles.size());
+
+	// 1x1 black placeholders so the samplers are always valid
+	const unsigned char black[4] = { 0, 0, 0, 255 };
+	for (int c = 0; c < NUM_IMAGE_CHANNELS; c++) {
+		glGenTextures(1, &g_img[c].id);
+		glBindTexture(GL_TEXTURE_2D, g_img[c].id);
+		setupTextureParams();
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, black);
+	}
+	if (!g_imageFiles.empty()) loadImageTexture(g_imageFiles[0], g_img[0]);
+}
+
+static void cleanupImageTextures() {
+	for (int c = 0; c < NUM_IMAGE_CHANNELS; c++) {
+		if (g_img[c].id) glDeleteTextures(1, &g_img[c].id);
+		g_img[c] = ImageTex();
+	}
+}
+
+// A shader can pick its own images with a comment near the top of the file:
+//   //!iChannel2 "wood.png"
+//   //!iChannel3 "sdmc:/switch/shaderfun/images/other/noise.jpg"
+// Bare names are looked up in sdmc:/switch/shaderfun/images/ first, then in the built-in romfs:/images/.
+//   //!scroller on     (or off) shows/hides the sinus scroller when this shader loads
+// Without a directive, iChannel2 shows the image selected with the X button.
+static void applyChannelDirectives(const std::string& fragSource) {
+	bool set[NUM_IMAGE_CHANNELS] = { false, false };
+	std::istringstream in(fragSource);
+	std::string line;
+	int lineNo = 0;
+	while (std::getline(in, line) && lineNo++ < 40) {
+		size_t sp = line.find("//!scroller");
+		if (sp != std::string::npos) {
+			g_scrollerEnabled = (toLower(line.substr(sp + 11)).find("off") == std::string::npos);
+		}
+		for (int c = 0; c < NUM_IMAGE_CHANNELS; c++) {
+			std::string key = "//!iChannel" + std::to_string(c + 2);
+			size_t p = line.find(key);
+			if (p == std::string::npos) continue;
+			size_t q1 = line.find('"', p);
+			size_t q2 = (q1 == std::string::npos) ? std::string::npos : line.find('"', q1 + 1);
+			if (q2 == std::string::npos) continue;
+			std::string name = line.substr(q1 + 1, q2 - q1 - 1);
+			std::string full = name;
+			if (name.find(':') == std::string::npos) {
+				struct stat ist;
+				full = "sdmc:/switch/shaderfun/images/" + name;
+				if (stat(full.c_str(), &ist) != 0) full = "romfs:/images/" + name;
+			}
+			loadImageTexture(full, g_img[c]);
+			set[c] = true;
+		}
+	}
+	if (!set[0] && !g_imageFiles.empty()) {
+		loadImageTexture(g_imageFiles[g_imageIndex % g_imageFiles.size()], g_img[0]);
+	}
+}
+
+// === Shader state ===
+struct ShaderProgram {
+	GLuint prog = 0;
+	GLint iResolutionLoc = -1;
+	GLint iTimeLoc = -1;
+	GLint iTimeDeltaLoc = -1;
+	GLint iFrameLoc = -1;
+	GLint iMouseLoc = -1;
+	GLint iChannelResolutionLoc = -1;
+	GLint iChannelLoc[4] = { -1, -1, -1, -1 };
+};
+
+static time_t g_shaderMtime = 0; // modification time of the currently loaded shader file
+
+// isFallback stops the "fall back to the fallback" recursion if even that fails to compile.
+ShaderProgram loadShaderProgram(const char* fragSrc, const std::string& label = "built-in", bool isFallback = false) {
+	std::string err;
+	GLuint vs = compileShader(GL_VERTEX_SHADER, vertexShaderSrc, &err);
+	GLuint fs = vs ? compileShader(GL_FRAGMENT_SHADER, fragSrc, &err) : 0;
+
+	GLuint prog = 0;
+	if (vs && fs) {
+		prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glBindAttribLocation(prog, 0, "aPos");
+		glLinkProgram(prog);
+
+		GLint linkStatus = 0;
+		glGetProgramiv(prog, GL_LINK_STATUS, &linkStatus);
+		if (!linkStatus) {
+			char buffer[2048];
+			glGetProgramInfoLog(prog, sizeof(buffer), NULL, buffer);
+			err = std::string("link error: ") + buffer;
+			glDeleteProgram(prog);
+			prog = 0;
+		}
+	}
+	if (vs) glDeleteShader(vs);
+	if (fs) glDeleteShader(fs);
 
 	ShaderProgram sp;
+	if (!prog) {
+		logShaderError(label, err);
+		if (isFallback) return sp;
+		printf("Using fallback shader instead.\n");
+		return loadShaderProgram(fallbackFragmentShader, "fallback", true);
+	}
+
 	sp.prog = prog;
 	sp.iResolutionLoc = glGetUniformLocation(prog, "iResolution");
 	sp.iTimeLoc = glGetUniformLocation(prog, "iTime");
-
-	printf("Shader loaded successfully. iResolution loc: %d, iTime loc: %d\n",
-		sp.iResolutionLoc, sp.iTimeLoc);
-
+	sp.iTimeDeltaLoc = glGetUniformLocation(prog, "iTimeDelta");
+	sp.iFrameLoc = glGetUniformLocation(prog, "iFrame");
+	sp.iMouseLoc = glGetUniformLocation(prog, "iMouse");
+	sp.iChannelResolutionLoc = glGetUniformLocation(prog, "iChannelResolution");
+	for (int c = 0; c < 4; c++) {
+		std::string n = "iChannel" + std::to_string(c);
+		sp.iChannelLoc[c] = glGetUniformLocation(prog, n.c_str());
+	}
+	printf("Shader loaded: %s\n", label.c_str());
 	return sp;
 }
 
 // === Load fragment shader file (with fallback) ===
 ShaderProgram loadShaderFromFile(const std::string& path) {
 	printf("Loading shader from: %s\n", path.c_str());
+
+	struct stat st;
+	g_shaderMtime = (stat(path.c_str(), &st) == 0) ? st.st_mtime : 0;
+
 	std::string fragSource = loadFile(path.c_str());
 	if (fragSource.empty()) {
 		printf("Shader file is empty, using fallback\n");
+		return loadShaderProgram(fallbackFragmentShader, path + " (empty)", true);
 	}
-	const char* fragSrcCStr = fragSource.empty() ? fallbackFragmentShader : fragSource.c_str();
-	return loadShaderProgram(fragSrcCStr);
+	applyChannelDirectives(fragSource);
+	return loadShaderProgram(fragSource.c_str(), path);
 }
 
 // === Recursively scan shader folder and subfolders ===
@@ -330,22 +528,34 @@ GLuint audioTexSpectrum;
 // Music object
 Mix_Music* music = nullptr;
 
+// Ring buffer write position (audio thread writes, main thread reads)
+static volatile int g_waveWrite = 0;
+static float audioWaveformOrdered[FFT_SIZE]; // oldest -> newest, what the shaders and FFT see
+static const bool USE_HANN_WINDOW = true;    // reduces spectral leakage (gain-compensated)
+
 // Effect callback to capture PCM
 void audioEffectCallback(int chan, void* stream, int len, void* udata) {
 	int16_t* samples = (int16_t*)stream;
 	int count = len / 2; // 16-bit samples
-	static int idx = 0;
+	int w = g_waveWrite;
 	for (int i = 0; i < count; i += 2) { // left channel
-		float sample = samples[i] / 32768.0f;
-		audioWaveform[idx % FFT_SIZE] = sample;
-		idx++;
+		audioWaveform[w] = samples[i] / 32768.0f;
+		w = (w + 1) % FFT_SIZE;
 	}
+	g_waveWrite = w;
 }
 
 // Compute FFT from waveform
 void computeFFT() {
+	// Unroll the ring buffer so the waveform has no seam in the middle
+	const int start = g_waveWrite;
 	for (int i = 0; i < FFT_SIZE; i++) {
-		fftIn[i].r = audioWaveform[i];
+		float s = audioWaveform[(start + i) % FFT_SIZE];
+		audioWaveformOrdered[i] = s;
+		float win = USE_HANN_WINDOW
+			? 2.0f * (0.5f - 0.5f * cosf(2.0f * 3.14159265f * (float)i / (float)(FFT_SIZE - 1)))
+			: 1.0f;
+		fftIn[i].r = s * win;
 		fftIn[i].i = 0;
 	}
 	kiss_fft(fftCfg, fftIn, fftOut);
@@ -360,7 +570,7 @@ void computeFFT() {
 void uploadAudioTextures() {
 	// Waveform -> iChannel0
 	glBindTexture(GL_TEXTURE_2D, audioTexWaveform);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, FFT_SIZE, 1, 0, GL_LUMINANCE, GL_FLOAT, audioWaveform);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, FFT_SIZE, 1, 0, GL_LUMINANCE, GL_FLOAT, audioWaveformOrdered);
 
 	// Spectrum -> iChannel1
 	glBindTexture(GL_TEXTURE_2D, audioTexSpectrum);
@@ -710,6 +920,7 @@ int main(int argc, char* argv[]) {
 
 	padConfigureInput(1, HidNpadStyleSet_NpadStandard);
 	padInitializeDefault(&pad);
+	hidInitializeTouchScreen();
 	hidsysInitialize();
 
 	bool network_available = false;
@@ -739,6 +950,13 @@ int main(int argc, char* argv[]) {
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
 		printf("SDL_Init failed: %s\n", SDL_GetError());
 		return -1;
+	}
+
+	if ((IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG) & (IMG_INIT_PNG | IMG_INIT_JPG)) == 0) {
+		printf("IMG_Init failed: %s\n", IMG_GetError());
+	}
+	if (TTF_Init() < 0) {
+		printf("TTF_Init failed: %s\n", TTF_GetError());
 	}
 
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
@@ -826,6 +1044,20 @@ int main(int argc, char* argv[]) {
 
 	// Check directories first
 	checkDirectories();
+
+	// Image textures for iChannel2/iChannel3 (must run before the first shader loads)
+	initImageTextures();
+
+	// Sinus scroller overlay: font from the SD card first (so you can swap it), then the built-in one
+	{
+		const char* fontCandidates[] = { "sdmc:/switch/shaderfun/font.ttf", "romfs:/font.ttf" };
+		bool scrollerOk = false;
+		for (const char* p : fontCandidates) {
+			if (!scrollerOk) scrollerOk = scroller_init(p, 1280, 720);
+		}
+		if (scrollerOk) scroller_poll_text_file("sdmc:/switch/shaderfun/scroller.txt");
+		else printf("Scroller disabled: no usable font found\n");
+	}
 
 	// Scan shader directories with fallback logic
 	std::vector<std::string> shaderFiles;
@@ -1003,6 +1235,52 @@ int main(int argc, char* argv[]) {
 			printf("Reloaded music: %zu found\n", musicFiles.size());
 		}
 
+		// B: show/hide the sinus scroller
+		if ((kDown & HidNpadButton_B) && scroller_ready()) g_scrollerEnabled = !g_scrollerEnabled;
+
+		// X: cycle the image shown on iChannel2
+		if ((kDown & HidNpadButton_X) && !g_imageFiles.empty()) {
+			g_imageIndex = (g_imageIndex + 1) % (int)g_imageFiles.size();
+			loadImageTexture(g_imageFiles[g_imageIndex], g_img[0]);
+		}
+
+		// Auto-reload the current shader when its file changes (e.g. after an FTP upload)
+		{
+			static Uint32 lastMtimeCheck = 0;
+			if (!shaderFiles.empty() && SDL_GetTicks() - lastMtimeCheck > 1000) {
+				lastMtimeCheck = SDL_GetTicks();
+				scroller_poll_text_file("sdmc:/switch/shaderfun/scroller.txt");
+				struct stat st;
+				if (stat(shaderFiles[currentShader].c_str(), &st) == 0 && st.st_mtime != g_shaderMtime) {
+					printf("Shader file changed, reloading\n");
+					glDeleteProgram(shader.prog);
+					shader = loadShaderFromFile(shaderFiles[currentShader]);
+				}
+			}
+		}
+
+		// Touchscreen -> iMouse (Shadertoy convention: xy = position, zw = click position,
+		// zw negative when not pressed; y is measured from the bottom)
+		static float mouse[4] = { 0, 0, 0, 0 };
+		static bool wasTouching = false;
+		{
+			HidTouchScreenState touch = {};
+			hidGetTouchScreenStates(&touch, 1);
+			if (touch.count > 0) {
+				float tx = (float)touch.touches[0].x;
+				float ty = 720.0f - (float)touch.touches[0].y;
+				if (!wasTouching) { mouse[2] = tx; mouse[3] = ty; }
+				mouse[0] = tx;
+				mouse[1] = ty;
+				wasTouching = true;
+			}
+			else if (wasTouching) {
+				mouse[2] = -fabsf(mouse[2]);
+				mouse[3] = -fabsf(mouse[3]);
+				wasTouching = false;
+			}
+		}
+
 		// Update music position tracking
 		Uint32 currentTime = SDL_GetTicks();
 		if (musicPlaying && !musicSeeking && currentTime - lastMusicUpdate > 100) {
@@ -1012,7 +1290,7 @@ int main(int argc, char* argv[]) {
 		}
 
 		// Check if music ended naturally
-		if (musicPlaying && !Mix_PlayingMusic()) {
+		if (musicPlaying && !musicFiles.empty() && !Mix_PlayingMusic()) {
 			printf("Song ended, moving to next\n");
 			currentMusic = (currentMusic + 1) % musicFiles.size();
 			musicPosition = 0.0;
@@ -1177,19 +1455,31 @@ int main(int argc, char* argv[]) {
 		glUniform3f(shader.iResolutionLoc, 1280.0f, 720.0f, 1.0f);
 		glUniform1f(shader.iTimeLoc, time);
 
-		// Bind audio textures to shader channels
-		GLint loc0 = glGetUniformLocation(shader.prog, "iChannel0");
-		if (loc0 != -1) {
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, audioTexWaveform);
-			glUniform1i(loc0, 0);
+		// Optional Shadertoy uniforms (only set if the shader declares them)
+		static float prevTime = 0.0f;
+		if (shader.iTimeDeltaLoc != -1) glUniform1f(shader.iTimeDeltaLoc, time - prevTime);
+		prevTime = time;
+		// NOTE: declare as "uniform int iFrame;" in the shader
+		if (shader.iFrameLoc != -1) glUniform1i(shader.iFrameLoc, frameCount);
+		if (shader.iMouseLoc != -1) glUniform4f(shader.iMouseLoc, mouse[0], mouse[1], mouse[2], mouse[3]);
+		if (shader.iChannelResolutionLoc != -1) {
+			float res[12] = {
+				(float)FFT_SIZE, 1.0f, 1.0f,
+				(float)(FFT_SIZE / 2), 1.0f, 1.0f,
+				(float)g_img[0].w, (float)g_img[0].h, 1.0f,
+				(float)g_img[1].w, (float)g_img[1].h, 1.0f
+			};
+			glUniform3fv(shader.iChannelResolutionLoc, 4, res);
 		}
 
-		GLint loc1 = glGetUniformLocation(shader.prog, "iChannel1");
-		if (loc1 != -1) {
-			glActiveTexture(GL_TEXTURE1);
-			glBindTexture(GL_TEXTURE_2D, audioTexSpectrum);
-			glUniform1i(loc1, 1);
+		// Bind audio (0,1) and image (2,3) textures to the shader channels
+		const GLuint channelTex[4] = { audioTexWaveform, audioTexSpectrum, g_img[0].id, g_img[1].id };
+		for (int c = 0; c < 4; c++) {
+			if (shader.iChannelLoc[c] != -1) {
+				glActiveTexture(GL_TEXTURE0 + c);
+				glBindTexture(GL_TEXTURE_2D, channelTex[c]);
+				glUniform1i(shader.iChannelLoc[c], c);
+			}
 		}
 
 		glClear(GL_COLOR_BUFFER_BIT);
@@ -1200,6 +1490,19 @@ int main(int argc, char* argv[]) {
 		glEnableVertexAttribArray(0);
 
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+		// Sinus scroller overlay
+		if (g_scrollerEnabled && scroller_ready()) {
+			static Uint32 lastScrollTicks = SDL_GetTicks();
+			const Uint32 nowTicks = SDL_GetTicks();
+			const float sdt = (nowTicks - lastScrollTicks) / 1000.0f;
+			lastScrollTicks = nowTicks;
+			float bass = 0.0f; // low spectrum bins -> 0..1
+			for (int b = 1; b <= 4; b++) bass += audioSpectrum[b];
+			bass = fminf(1.0f, bass); // (sum of 4 bins == average * 4)
+			scroller_update(sdt, wasTouching, mouse[0], 720.0f - mouse[1], bass);
+			scroller_draw();
+		}
 
 		GLenum error = glGetError();
 		if (error != GL_NO_ERROR) {
@@ -1222,6 +1525,10 @@ int main(int argc, char* argv[]) {
 	cleanupAudio();
 	glDeleteTextures(1, &audioTexWaveform);
 	glDeleteTextures(1, &audioTexSpectrum);
+	scroller_shutdown();
+	cleanupImageTextures();
+	TTF_Quit();
+	IMG_Quit();
 	glDeleteProgram(shader.prog);
 	glDeleteBuffers(1, &vbo);
 	SDL_GL_DeleteContext(glContext);

@@ -55,7 +55,31 @@ Place .frag or .glsl files in /switch/shaderfun/shaders/ or /switch/shaderfun/te
 iResolution (vec3): Viewport resolution\
 iTime (float): Time in seconds\
 iChannel0 (sampler2D): Waveform data\
-iChannel1 (sampler2D): Spectrum data
+iChannel1 (sampler2D): Spectrum data  
+iChannel2 / iChannel3 (sampler2D): Images (PNG/JPG/BMP) from /switch/shaderfun/images/  
+iMouse (vec4): Touchscreen position (xy) and click position (zw), Shadertoy style  
+iTimeDelta (float), iFrame (int), iChannelResolution (vec3[4]): optional, declare them to use them  
+
+### Using images
+
+Put images in `sdmc:/switch/shaderfun/images/`. Press **X** to cycle the image shown on iChannel2.  
+A shader can also request specific images with comments near the top of the file:
+
+```
+//!iChannel2 "wood.png"
+//!iChannel3 "noise.jpg"
+```
+
+### Sinus scroller
+
+A rainbow sine-wave scroller can be drawn on top of any shader. Press **B** to show/hide it, or add `//!scroller on` to a shader to turn it on when that shader loads (see `shaders/Scroller/Image Background.frag`).  
+Touch the screen: letters near your finger swell and are pulled towards it, and the text follows your finger while you drag.  
+Edit the message in `sdmc:/switch/shaderfun/scroller.txt` (it reloads by itself). `#` pauses the text for 2 seconds, `$` toggles double speed.  
+Use your own font by putting `font.ttf` in `sdmc:/switch/shaderfun/`.
+
+Shaders are reloaded automatically when the file changes (e.g. after an FTP upload).  
+Compile errors are written to `sdmc:/switch/shaderfun/shader_errors.log`.  
+
 
 ## FTP Server
 The built-in FTP server allows easy file management:\
