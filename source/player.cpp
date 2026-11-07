@@ -430,6 +430,38 @@ bool playTracks(const std::vector<std::string>& tracks, int startIndex) {
 
 std::vector<std::string> queuePaths() { return g_queue; }
 
+std::vector<std::string> tracksInFolder(const std::string& dir) {
+	std::vector<std::string> tracks;
+	scanRecursive(dir, tracks, 0);
+	return tracks;
+}
+
+int enqueue(const std::vector<std::string>& tracks, bool playNext) {
+	if (tracks.empty()) return 0;
+	const int k = (int)tracks.size();
+	if (g_queue.empty()) { // nothing queued: this becomes the queue
+		setQueue(tracks, 0);
+		return loadCurrentOrSkip() ? k : 0;
+	}
+	const int n = (int)g_queue.size();
+	if (g_mode == MODE_SHUFFLE) {
+		// the new tracks go at the end of g_queue; only the play order decides when they are heard
+		g_queue.insert(g_queue.end(), tracks.begin(), tracks.end());
+		const int at = (playNext && g_pos >= 0) ? g_pos + 1 : (int)g_order.size();
+		std::vector<int> add(k);
+		for (int i = 0; i < k; i++) add[i] = n + i;
+		g_order.insert(g_order.begin() + at, add.begin(), add.end());
+	}
+	else {
+		// in order modes the play order is the queue itself, so insert straight into it
+		const int at = (playNext && g_pos >= 0) ? g_pos + 1 : n;
+		g_queue.insert(g_queue.begin() + at, tracks.begin(), tracks.end());
+		g_order.resize(n + k);
+		for (int i = 0; i < n + k; i++) g_order[i] = i;
+	}
+	return k;
+}
+
 // ================================================================== transport
 void play() {
 	if (g_order.empty()) return;

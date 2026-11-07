@@ -7,6 +7,7 @@
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
 #include <GLES2/gl2.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -1118,6 +1119,86 @@ void libActivate(int idx) {
 	}
 }
 
+// ---- add to queue (L3): whatever is highlighted goes to the end of the current queue
+bool rowTracks(const View& v, const Row& row, std::vector<std::string>& out, std::string& name) {
+	name = row.label;
+	switch (row.kind) {
+	case R_DIR: out = player::tracksInFolder(row.path); break;
+	case R_PLAYDIR: out = player::tracksInFolder(g_lib.dir); name = player::baseName(g_lib.dir); break;
+	case R_FILE: out.push_back(row.path); break;
+	case R_TRACK: if (row.ref >= 0 && row.ref < (int)v.trackPaths.size()) out.push_back(v.trackPaths[row.ref]); break;
+	case R_PLAYALL: out = v.trackPaths; name = v.title; break;
+	case R_ALBUM: case R_ARTIST: case R_GENRE: out = pathsOf(*v.snap, v.groups[row.ref].tracks); break;
+	case R_PLAYLIST: out = library::loadPlaylist(row.path); break;
+	default: return false;
+	}
+	return true;
+}
+
+void libQueueSelected(bool playNext) {
+	View& v = cur();
+	if (v.sel < 0 || v.sel >= (int)v.rows.size()) return;
+	std::vector<std::string> paths;
+	std::string name;
+	if (!rowTracks(v, v.rows[v.sel], paths, name)) {
+		showToast("Highlight a song, album, artist, genre, playlist or folder to queue it");
+		return;
+	}
+	if (paths.empty()) { showToast("Nothing to queue there"); return; }
+	const bool wasEmpty = !player::hasTracks();
+	const int added = player::enqueue(paths, playNext);
+	if (added <= 0) { showToast("Could not queue that"); return; }
+	if (wasEmpty) { showToast("Playing: " + name); return; }
+	showToast(std::string(playNext ? "Playing next: " : "Added to queue: ") + name +
+		(added > 1 ? " (" + std::to_string(added) + " tracks)" : ""));
+}
+
+// ---- jump by letter (right stick left/right): previous / next first letter in the list
+char rowLetter(const Row& r) {
+	switch (r.kind) {
+	case R_DIR: case R_FILE: case R_TRACK: case R_ALBUM: case R_ARTIST: case R_GENRE: case R_PLAYLIST: break;
+	default: return 0; // Back / Play all / home rows etc. do not belong to a letter
+	}
+	for (unsigned char c : r.label) {
+		if (c >= 0x80) return '#';
+		if (isalpha(c)) return (char)toupper(c);
+		if (isdigit(c)) return '#';
+	}
+	return '#';
+}
+
+void libJumpLetter(int dir) {
+	View& v = cur();
+	const int n = (int)v.rows.size();
+	if (n == 0) return;
+	auto L = [&](int i) { return rowLetter(v.rows[i]); };
+	const int sel = std::min(std::max(v.sel, 0), n - 1);
+	const char c = L(sel);
+	int target = -1;
+	if (dir > 0) {
+		for (int i = sel + 1; i < n; i++) { const char l = L(i); if (l && l != c) { target = i; break; } }
+	}
+	else if (c) {
+		int start = sel;
+		while (start > 0 && L(start - 1) == c) start--;
+		if (start < sel) target = start;            // first press: top of this letter
+		else {                                      // already there: top of the previous letter
+			int i = start - 1;
+			while (i >= 0 && !L(i)) i--;
+			if (i >= 0) {
+				const char pc = L(i);
+				while (i > 0 && L(i - 1) == pc) i--;
+				target = i;
+			}
+		}
+	}
+	if (target < 0) return;
+	v.sel = target;
+	ensureVisible(v);
+	const char l = L(target);
+	showToast(l == '#' ? std::string("Jump to 0-9 / symbols") : std::string("Jump to ") + l);
+}
+
 // X: play whatever is highlighted (a folder, album, artist, genre or playlist) from its first track
 void libPlaySelected() {
 	View& v = cur();
@@ -1543,6 +1624,9 @@ Result update(const Input& in) {
 		if (g_repPgUp.fire(d & BTN_LS_LEFT, h & BTN_LS_LEFT, dt, 0.4f, 0.14f)) libMove(-LIB_PAGE_ROWS);
 		if (d & BTN_LS_UP) libJumpTo(0);
 		if (d & BTN_LS_DOWN) libJumpTo((int)cur().rows.size() - 1);
+		if (d & BTN_RS_RIGHT) libJumpLetter(+1);
+		if (d & BTN_RS_LEFT) libJumpLetter(-1);
+		if (d & BTN_L3) libQueueSelected(false);
 		if (d & BTN_A) libActivate(cur().sel);
 		if (d & BTN_B) libBack(true);
 		if (d & BTN_LEFT) libBack(false);

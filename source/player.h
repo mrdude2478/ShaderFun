@@ -46,6 +46,11 @@ bool playFolder(const std::string& dir);     // queue everything inside (recursi
 bool playFile(const std::string& file);      // queue the tracks of the file's folder, start at this file
 bool playTracks(const std::vector<std::string>& tracks, int startIndex); // queue exactly these tracks (albums, playlists...)
 std::vector<std::string> queuePaths();       // the current queue in its original order
+std::vector<std::string> tracksInFolder(const std::string& dir); // every music file inside (recursive), in play order
+// Add tracks to the running queue without interrupting the current track.
+// playNext=true: they play right after the current track; false: at the end of the queue.
+// If nothing is queued yet they simply start playing. Returns how many tracks were added.
+int enqueue(const std::vector<std::string>& tracks, bool playNext);
 
 // ---- transport
 void play();                 // start/resume (starts the current queue entry if stopped)

@@ -14,7 +14,8 @@ enum : uint32_t {
 	BTN_A = 1u << 4, BTN_B = 1u << 5, BTN_X = 1u << 6, BTN_Y = 1u << 7,
 	BTN_L = 1u << 8, BTN_R = 1u << 9, BTN_ZL = 1u << 10, BTN_ZR = 1u << 11,
 	BTN_R3 = 1u << 12, BTN_L3 = 1u << 13,
-	BTN_LS_UP = 1u << 14, BTN_LS_DOWN = 1u << 15, BTN_LS_LEFT = 1u << 16, BTN_LS_RIGHT = 1u << 17 // left stick as digital directions
+	BTN_LS_UP = 1u << 14, BTN_LS_DOWN = 1u << 15, BTN_LS_LEFT = 1u << 16, BTN_LS_RIGHT = 1u << 17, // left stick as digital directions
+	BTN_RS_LEFT = 1u << 18, BTN_RS_RIGHT = 1u << 19  // right stick left/right
 };
 
 struct Input {

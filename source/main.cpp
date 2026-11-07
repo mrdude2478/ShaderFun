@@ -1088,7 +1088,8 @@ int main(int argc, char* argv[]) {
 				{ HidNpadButton_ZL, ui::BTN_ZL }, { HidNpadButton_ZR, ui::BTN_ZR },
 				{ HidNpadButton_StickR, ui::BTN_R3 }, { HidNpadButton_StickL, ui::BTN_L3 },
 				{ HidNpadButton_StickLUp, ui::BTN_LS_UP }, { HidNpadButton_StickLDown, ui::BTN_LS_DOWN },
-				{ HidNpadButton_StickLLeft, ui::BTN_LS_LEFT }, { HidNpadButton_StickLRight, ui::BTN_LS_RIGHT } };
+				{ HidNpadButton_StickLLeft, ui::BTN_LS_LEFT }, { HidNpadButton_StickLRight, ui::BTN_LS_RIGHT },
+				{ HidNpadButton_StickRLeft, ui::BTN_RS_LEFT }, { HidNpadButton_StickRRight, ui::BTN_RS_RIGHT } };
 			static Uint32 lastUiTicks = SDL_GetTicks();
 			const Uint32 nowUiTicks = SDL_GetTicks();
 			const u64 kHeld = padGetButtons(&pad);
@@ -1211,6 +1212,8 @@ int main(int argc, char* argv[]) {
 			const bool matHeld  = (kHeld & HidNpadButton_ZR) != 0;
 
 			float sx = 0.0f, sy = 0.0f;
+			const bool menuOpen = ui::libraryOpen(); // the right stick browses letters in the library
+			if (menuOpen) { stick.x = 0; stick.y = 0; }
 			if (abs(stick.x) > DEAD) sx = stick.x / 32767.0f;
 			if (abs(stick.y) > DEAD) sy = stick.y / 32767.0f;
 
