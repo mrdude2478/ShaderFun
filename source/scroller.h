@@ -13,6 +13,10 @@ void scroller_shutdown();
 // Replace the scrolling message. '#' pauses the text for 2 seconds, '$' toggles double speed.
 void scroller_set_text(const std::string& text);
 
+// Shows "Now playing: <text>" in front of the message and restarts the scroll (empty string clears it).
+// UTF-8 is accepted; characters outside Latin-1 are shown as '?'.
+void scroller_set_now_playing(const std::string& nowPlaying);
+
 // Loads the message from a text file when the file's modification time changes
 // (so a message uploaded over FTP shows up by itself). Returns true if the text was (re)loaded.
 bool scroller_poll_text_file(const char* path);

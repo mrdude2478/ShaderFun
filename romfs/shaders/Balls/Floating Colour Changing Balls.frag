@@ -1,4 +1,5 @@
 precision mediump float;
+//!scroller off
 
 uniform vec3 iResolution;
 uniform float iTime;

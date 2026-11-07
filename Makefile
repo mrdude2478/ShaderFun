@@ -34,8 +34,9 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:=	`$(PREFIX)pkg-config --libs SDL2 SDL2_mixer SDL2_image SDL2_ttf` \
-			-lnx -lm -lEGL -lGLESv2 -lglapi -ldrm_nouveau
+LIBS    :=  $(shell $(PREFIX)pkg-config --libs SDL2 SDL2_mixer SDL2_image SDL2_ttf 2>/dev/null || \
+            echo "-lSDL2_mixer -lSDL2 -lopusfile -lopus -lmodplug -lvorbisidec -logg -lSDL2_image -lpng -ljpeg -lwebp -lSDL2_ttf -lfreetype -lharfbuzz -lgraphite2 -lbz2 -lz") \
+            -lnx -lm -lEGL -lGLESv2 -lglapi -ldrm_nouveau
 			
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

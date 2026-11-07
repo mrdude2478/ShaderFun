@@ -73,6 +73,8 @@ int g_screenW = 1280, g_screenH = 720;
 bool g_ready = false;
 
 std::string g_text;
+std::string g_base;    // the message (default text or scroller.txt), as Latin-1
+std::string g_prefix;  // "Now playing: ..." shown in front of it
 std::vector<float> g_offsets;    // x offset of every character from the start of the text
 std::vector<char> g_processed;   // '#'/'$' already handled this loop
 float g_totalLength = 0.0f;
@@ -196,6 +198,33 @@ void pushQuad(float x, float y, const Glyph& g, const float rgb[3], float kind) 
 	}
 }
 
+// UTF-8 -> Latin-1 (what the glyph atlas covers); anything else becomes '?'
+std::string toLatin1(const std::string& in) {
+	std::string out;
+	size_t i = 0;
+	while (i < in.size()) {
+		unsigned char c = (unsigned char)in[i];
+		unsigned cp = c;
+		size_t len = 1;
+		if (c >= 0xC0 && c < 0xE0 && i + 1 < in.size() && ((unsigned char)in[i + 1] & 0xC0) == 0x80) {
+			cp = ((c & 0x1Fu) << 6) | ((unsigned char)in[i + 1] & 0x3Fu);
+			len = 2;
+		}
+		else if (c >= 0xE0) {            // 3/4-byte sequences are never Latin-1
+			len = (c >= 0xF0) ? 4 : 3;
+			cp = '?';
+		}
+		else if (c >= 0x80 && c < 0xC0) { // stray byte: assume it already is Latin-1
+			cp = c;
+		}
+		if (cp == '\n' || cp == '\r' || cp == '\t') cp = ' ';
+		if (cp > 255 || (cp >= 127 && cp < 160)) cp = '?';
+		out.push_back((char)cp);
+		i += len;
+	}
+	return out;
+}
+
 void layoutText() {
 	const size_t n = g_text.size();
 	g_offsets.assign(n, 0.0f);
@@ -225,10 +254,11 @@ bool scroller_init(const char* fontPath, int screenW, int screenH) {
 	}
 
 	// --- measure
-	const int FIRST = 32, LAST = 126, COUNT = LAST - FIRST + 1, COLS = 16;
+	const int FIRST = 32, LAST = 255, COUNT = LAST - FIRST + 1, COLS = 16; // ASCII + Latin-1
 	const int ROWS = (COUNT + COLS - 1) / COLS;
 	int maxW = 1;
 	for (int c = FIRST; c <= LAST; c++) {
+		if (c >= 127 && c < 160) continue; // control characters
 		char s[2] = { (char)c, 0 };
 		int w = 0, h = 0;
 		TTF_SizeText(font, s, &w, &h);
@@ -256,6 +286,7 @@ bool scroller_init(const char* fontPath, int screenW, int screenH) {
 	SDL_FillRect(atlas, NULL, 0);
 	const SDL_Color white = { 255, 255, 255, 255 };
 	for (int c = FIRST; c <= LAST; c++) {
+		if (c >= 127 && c < 160) continue;
 		char s[2] = { (char)c, 0 };
 		SDL_Surface* raw = TTF_RenderText_Blended(font, s, white);
 		if (!raw) continue; // e.g. nothing to draw for a blank glyph; advance is still known
@@ -292,7 +323,14 @@ bool scroller_init(const char* fontPath, int screenW, int screenH) {
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlasW, atlasH, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas->pixels);
+	{
+		std::vector<unsigned char> alpha((size_t)atlasW * atlasH);
+		for (int y = 0; y < atlasH; y++) {
+			const Uint32* row = (const Uint32*)((const unsigned char*)atlas->pixels + (size_t)y * atlas->pitch);
+			for (int x = 0; x < atlasW; x++) alpha[(size_t)y * atlasW + x] = (unsigned char)(row[x] >> 24); // ABGR8888: alpha is the top byte
+		}
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, atlasW, atlasH, 0, GL_ALPHA, GL_UNSIGNED_BYTE, alpha.data());
+	}
 	SDL_FreeSurface(atlas);
 
 	// --- program
@@ -342,16 +380,30 @@ void scroller_shutdown() {
 	g_ready = false;
 }
 
-void scroller_set_text(const std::string& text) {
-	g_text = text;
-	for (char& c : g_text) {
-		if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-	}
+static void rebuildText() {
+	g_text = g_prefix + g_base;
 	layoutText();
-	g_xPos = (float)g_screenW;
+	g_xPos = (float)g_screenW; // restart from the right edge
 	g_pauseTimer = 0.0f;
 	g_scrollMul = 1.0f;
 	g_speedIncreased = false;
+}
+
+void scroller_set_text(const std::string& text) {
+	g_base = toLatin1(text);
+	rebuildText();
+}
+
+void scroller_set_now_playing(const std::string& nowPlaying) {
+	if (nowPlaying.empty()) {
+		g_prefix.clear();
+	}
+	else {
+		std::string t = toLatin1(nowPlaying);
+		for (char& c : t) if (c == '#' || c == '$') c = ' '; // those are control characters in the message
+		g_prefix = "Now playing: " + t + "        ";
+	}
+	rebuildText();
 }
 
 bool scroller_poll_text_file(const char* path) {

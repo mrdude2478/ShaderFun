@@ -1,0 +1,19 @@
+# Build outputs
+build/
+*.nro
+*.elf
+*.nacp
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# Scratch / logs
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+add.txt

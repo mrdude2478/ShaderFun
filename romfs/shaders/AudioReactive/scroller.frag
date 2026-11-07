@@ -1,4 +1,4 @@
-//!iChannel2 "background.png"
+//!iChannel2 "scroller.jpg"
 //!scroller on
 precision mediump float;
 uniform vec3 iResolution;

@@ -96,10 +96,8 @@ bool load_ftp_config(void) {
 	}
 
 	char line[256];
-	int line_num = 0;
 
 	while (fgets(line, sizeof(line), file)) {
-		line_num++;
 
 		// Skip empty lines and comments
 		if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') {
