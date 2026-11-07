@@ -10,6 +10,7 @@
 #include <string.h>
 #include <algorithm>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 
@@ -521,6 +522,37 @@ bool savePlaylist(const std::string& path, const std::vector<std::string>& track
 	f << "#EXTM3U\n";
 	for (const std::string& t : tracks) f << t << "\n";
 	return f.good();
+}
+
+int appendToPlaylist(const std::string& path, const std::vector<std::string>& tracks) {
+	std::set<std::string> have;
+	for (const std::string& p : loadPlaylist(path)) have.insert(p);
+	std::vector<std::string> add;
+	for (const std::string& t : tracks) if (have.insert(t).second) add.push_back(t);
+	if (add.empty()) return 0;
+	bool needNewline = false; // a hand-made file might not end with a line break
+	{
+		std::ifstream in(path, std::ios::binary | std::ios::ate);
+		if (in.is_open() && in.tellg() > 0) {
+			in.seekg(-1, std::ios::end);
+			char c = '\n';
+			in.get(c);
+			needNewline = (c != '\n');
+		}
+	}
+	std::ofstream f(path, std::ios::app);
+	if (!f.is_open()) return -1;
+	if (needNewline) f << "\n";
+	for (const std::string& t : add) f << t << "\n";
+	return f.good() ? (int)add.size() : -1;
+}
+
+bool renamePlaylist(const std::string& oldPath, const std::string& newPath) {
+	return rename(oldPath.c_str(), newPath.c_str()) == 0;
+}
+
+bool deletePlaylist(const std::string& path) {
+	return remove(path.c_str()) == 0;
 }
 
 } // namespace library

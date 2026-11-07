@@ -11,6 +11,8 @@ namespace tags {
 
 struct TrackTags {
 	bool found = false;            // some metadata (not just file info) was found
+	bool wantLyrics = false;       // INPUT: set by read() from its wantLyrics argument
+	std::string lyrics;            // embedded lyrics (ID3 USLT / Vorbis LYRICS), only filled when asked for
 	std::string format;            // e.g. "MP3 - MPEG-1 Layer III"
 	std::string tagType;           // e.g. "ID3v2.3 + ID3v1"
 
@@ -34,7 +36,8 @@ struct TrackTags {
 // average bitrate of VBR / lossless files.
 // light = true: text tags only (no cover art, no MPEG header probing). That is what the library index uses,
 // and it avoids reading megabytes of artwork per file.
-bool read(const std::string& path, TrackTags& out, double durationSeconds = 0.0, bool light = false);
+// wantLyrics = true also fills out.lyrics (not needed for indexing, so off by default).
+bool read(const std::string& path, TrackTags& out, double durationSeconds = 0.0, bool light = false, bool wantLyrics = false);
 
 // exposed for tests
 std::string base64Decode(const std::string& in, std::vector<uint8_t>& out);

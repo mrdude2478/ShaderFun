@@ -35,6 +35,7 @@ int currentIndex();
 std::string next();
 std::string prev();
 std::string setIndex(int idx);
+std::string currentFileName(); // file name of the selected model ("" if none) - used to restore it on the next launch
 
 // Select by filename (basename or full path). Returns name or empty on failure.
 // Example: selectByName("spaceship.obj") or selectByName("spaceship")

@@ -29,6 +29,7 @@ struct Input {
 struct Result {
 	uint32_t consumedButtons = 0; // buttons the UI used this frame - main should ignore them
 	bool consumedTouch = false;   // this touch belongs to the UI - don't forward it to shaders/scroller
+	bool requestQuit = false;     // the sleep timer wants the app to close - main should leave its loop
 };
 
 // Fonts are tried in the order they were added, per character (so a later font can supply CJK etc.).
@@ -45,6 +46,8 @@ void draw();
 
 void toast(const std::string& text); // small message in the top-left corner
 bool libraryOpen();
+bool lyricsAvailable();        // the current song has lyrics (a .lrc file or embedded in its tags)
+void lyricsShow(bool show);    // show / hide them (main.cpp: right stick right / left)
 int autoCycleSeconds();   // auto-change visualisation interval in seconds, 0 = off
 bool infoOpen();   // the track info panel (L3, or tap the title) is showing
 

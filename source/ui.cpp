@@ -2,6 +2,8 @@
 #include "player.h"
 #include "tags.h"
 #include "library.h"
+#include "lyrics.h"
+#include <switch.h> // software keyboard (swkbd)
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -673,10 +675,10 @@ Repeater g_repUp, g_repDown, g_repVol, g_repPgUp, g_repPgDown;
 // ============================================================================ library
 enum RowKind {
 	R_UP, R_PLAYDIR, R_SETDIR, R_DIR, R_FILE,                                   // folder browser
-	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, // library views
-	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN
+	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, // library views
+	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT
 };
-enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST };
+enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST };
 
 struct Row {
 	RowKind kind;
@@ -701,13 +703,17 @@ struct View {
 	bool dirty = false;                              // home page: rebuild on the next frame
 	bool builtScanning = false;
 	int plCount = 0;
+	std::string playlistPath;                        // playlist page: the .m3u file (for deleting it)
+	bool confirmDelete = false;                      // playlist page: 'delete' was pressed once
 };
 
-enum LibMode { M_MENU, M_FOLDERS };
+enum LibMode { M_MENU, M_FOLDERS, M_PICK }; // M_PICK: the 'add to playlist' page, shown over either of the others
 struct Library {
 	bool open = false;
 	float slide = 0.0f;
 	LibMode mode = M_MENU;
+	View pick;                        // 'add to playlist' page
+	LibMode pickReturn = M_MENU;      // where to go back to afterwards
 	std::string dir;                  // folder browser: current folder
 	View folder;                      // folder browser: its rows
 	std::vector<View> stack;          // menu pages; stack[0] is the home page
@@ -715,6 +721,7 @@ struct Library {
 } g_lib;
 
 View& cur() {
+	if (g_lib.mode == M_PICK) return g_lib.pick;
 	if (g_lib.mode == M_FOLDERS) return g_lib.folder;
 	if (g_lib.stack.empty()) { static View none; return none; }
 	return g_lib.stack.back();
@@ -744,6 +751,32 @@ std::string autoLabel() {
 	if (g_autoSecs == 0) return "off";
 	if (g_autoSecs >= 120) return "every " + std::to_string(g_autoSecs / 60) + " min";
 	return "every " + std::to_string(g_autoSecs) + " s";
+}
+
+// ---- sleep timer: Off -> 15 -> 30 -> 45 -> 60 -> 90 min -> after this track -> Off
+const int SLEEP_STEPS[] = { 0, 15, 30, 45, 60, 90, player::SLEEP_END_OF_TRACK };
+int g_sleepStep = 0;             // the option picked last (minutes), for cycling
+float g_quitCountdown = 0.0f;      // > 0: the app is about to close because the sleep timer ended
+bool g_mediaStateReleased = false; // true while we have told the system it may go to sleep
+
+std::string sleepLabel() {
+	if (!player::sleepActive()) return "off";
+	if (player::sleepAtTrackEnd()) return "pauses after this track";
+	if (player::sleepFading()) return "fading out...";
+	const int mins = (player::sleepSecondsLeft() + 59) / 60;
+	return std::to_string(mins) + (mins == 1 ? " minute left" : " minutes left");
+}
+
+void cycleSleep() {
+	int idx = 0;
+	if (player::sleepActive())
+		for (int i = 0; i < (int)(sizeof(SLEEP_STEPS) / sizeof(SLEEP_STEPS[0])); i++) if (SLEEP_STEPS[i] == g_sleepStep) idx = i;
+	idx = (idx + 1) % (int)(sizeof(SLEEP_STEPS) / sizeof(SLEEP_STEPS[0]));
+	g_sleepStep = SLEEP_STEPS[idx];
+	player::setSleepTimer(g_sleepStep);
+	if (g_sleepStep == 0) showToast("Sleep timer: off");
+	else if (g_sleepStep < 0) showToast("Sleep timer: the music pauses after this track");
+	else showToast("Sleep timer: " + std::to_string(g_sleepStep) + " minutes");
 }
 
 void cycleAuto() {
@@ -871,6 +904,10 @@ View makeHome(int plCount) {
 	v.rows.push_back({ R_HOME_PLAYLISTS, "Playlists", "", std::to_string(plCount) });
 	v.rows.push_back({ R_HOME_ALL, "All songs", "", std::to_string(s.tracks.size()) });
 	v.rows.push_back({ R_HOME_AUTO, "Auto-change visualisation", "", autoLabel() });
+	v.rows.push_back({ R_HOME_SLEEP, "Sleep timer", "", sleepLabel() });
+	if (player::sleepActive()) // only relevant while a sleep timer is running
+	v.rows.push_back({ R_HOME_SLEEPACT, "When the sleep timer ends", "", player::configInt("sleep_quit", 1) ? "close the app" : "pause only" });
+	v.rows.push_back({ R_HOME_RESUME, "Resume on launch", "", player::configInt("resume_play", 0) ? "keeps playing" : "starts paused" });
 	v.rows.push_back({ R_HOME_RESCAN, "Rescan library", "",
 		scan ? "scanning " + std::to_string(library::scanDone()) + " / " + std::to_string(library::scanTotal()) : "look for new music" });
 	v.subtitle = scan ? "Scanning... " + std::to_string(library::scanDone()) + " / " + std::to_string(library::scanTotal())
@@ -901,6 +938,8 @@ View makeGroupList(PageKind kind) {
 	return v;
 }
 
+void sortByTitle(const library::Snapshot& s, std::vector<int>& idx);
+
 View makeAlbumView(std::shared_ptr<const library::Snapshot> snap, const library::Group& g) {
 	const bool various = lowerStr(g.sub).find("various") != std::string::npos;
 	return makeTrackView(PG_ALBUM, g.name, (g.sub.empty() ? "" : g.sub + "  -  ") + plural(g.tracks.size(), "track", "tracks"),
@@ -908,8 +947,10 @@ View makeAlbumView(std::shared_ptr<const library::Snapshot> snap, const library:
 }
 
 View makeGenreView(std::shared_ptr<const library::Snapshot> snap, const library::Group& g) {
+	std::vector<int> sorted = g.tracks;
+	sortByTitle(*snap, sorted);
 	return makeTrackView(PG_GENRE, g.name, plural(g.tracks.size(), "track", "tracks"),
-		itemsFromTracks(*snap, g.tracks, 2), "Play all", snap);
+		itemsFromTracks(*snap, sorted, 2), "Play all", snap);
 }
 
 View makeArtistView(std::shared_ptr<const library::Snapshot> snap, const library::Group& g) {
@@ -929,10 +970,22 @@ View makeArtistView(std::shared_ptr<const library::Snapshot> snap, const library
 	return v;
 }
 
+// alphabetical by title (case-insensitive) so the letter jump lands on the right songs
+void sortByTitle(const library::Snapshot& s, std::vector<int>& idx) {
+	std::vector<std::pair<std::string, int>> keyed;
+	keyed.reserve(idx.size());
+	for (int i : idx) keyed.push_back({ lowerStr(library::displayTitle(s.tracks[i])), i });
+	std::stable_sort(keyed.begin(), keyed.end(), [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) {
+		return a.first < b.first;
+	});
+	for (size_t k = 0; k < keyed.size(); k++) idx[k] = keyed[k].second;
+}
+
 View makeAllSongs() {
 	auto snap = library::snapshot();
 	std::vector<int> all(snap->tracks.size());
 	for (size_t i = 0; i < all.size(); i++) all[i] = (int)i;
+	sortByTitle(*snap, all);
 	View v = makeTrackView(PG_ALL, "All songs", plural(all.size(), "track", "tracks"), itemsFromTracks(*snap, all, 2), "Play all", snap);
 	v.emptyMsg = library::scanning() ? "Scanning your music..." : "No tracks in the library yet";
 	return v;
@@ -959,6 +1012,9 @@ View makePlaylistView(const std::string& path, const std::string& name) {
 	}
 	View v = makeTrackView(PG_PLAYLIST, name, plural(items.size(), "track", "tracks"), items, "Play playlist", snap);
 	v.emptyMsg = "This playlist has no playable files";
+	v.playlistPath = path;
+	v.rows.push_back({ R_RENAMEPLAYLIST, "Rename this playlist", "", "" });
+	v.rows.push_back({ R_DELPLAYLIST, "Delete this playlist", "", "" });
 	return v;
 }
 
@@ -967,7 +1023,7 @@ View makePlaylistsView() {
 	v.kind = PG_PLAYLISTS;
 	v.title = "Playlists";
 	v.rows.push_back({ R_BACK, "Back", "", "" });
-	if (!player::queuePaths().empty()) v.rows.push_back({ R_SAVEQUEUE, "Save current queue as a playlist", "", "" });
+	if (!player::chosenQueuePaths().empty()) v.rows.push_back({ R_SAVEQUEUE, "Save my queued songs as a playlist", "", "" });
 	const size_t firstList = v.rows.size();
 	const std::vector<library::Playlist> pls = library::listPlaylists(player::musicFolder());
 	for (const library::Playlist& p : pls) v.rows.push_back({ R_PLAYLIST, p.name, p.path, "" });
@@ -976,6 +1032,28 @@ View makePlaylistsView() {
 	v.emptyMsg = "No playlists yet - add .m3u files to switch/shaderfun/playlists";
 	v.sel = (int)(firstList < v.rows.size() ? firstList : v.rows.size() - 1);
 	return v;
+}
+
+// 'Add to playlist' page: pick a target for the tracks of the highlighted item (kept in trackPaths)
+View makePickPlaylistView(const std::vector<std::string>& paths, const std::string& what) {
+	View v;
+	v.kind = PG_PICKLIST;
+	v.title = "Add to playlist";
+	v.subtitle = what + "  -  " + plural(paths.size(), "track", "tracks");
+	v.trackPaths = paths;
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_NEWPLAYLIST, "New playlist", "", "" });
+	for (const library::Playlist& p : library::listPlaylists(player::musicFolder()))
+		v.rows.push_back({ R_PICKPLAYLIST, p.name, p.path, "" });
+	v.sel = 1;
+	return v;
+}
+
+// keeps the "Playlists" count on the home page in step with the .m3u files on the card
+void libUpdatePlaylistCount() {
+	if (g_lib.stack.empty()) return;
+	g_lib.stack[0].plCount = (int)library::listPlaylists(player::musicFolder()).size();
+	g_lib.stack[0].dirty = true;
 }
 
 // ---- navigation
@@ -990,7 +1068,7 @@ void libPush(View v) {
 void libShowMenu() {
 	g_lib.mode = M_MENU;
 	if (g_lib.stack.empty()) g_lib.stack.push_back(makeHome(library::listPlaylists(player::musicFolder()).size()));
-	else g_lib.stack.resize(1);
+	else { g_lib.stack.resize(1); libUpdatePlaylistCount(); }
 }
 
 void libOpenFolders() {
@@ -1013,18 +1091,20 @@ void libOpenNow() {
 	g_lib.open = true;
 	if (g_lib.mode == M_FOLDERS) buildRows("");
 	else if (g_lib.stack.empty()) libShowMenu();
+	else libUpdatePlaylistCount();
 }
 
-void libClose() { g_lib.open = false; g_touchOwned = false; }
+void libClose() { if (g_lib.mode == M_PICK) g_lib.mode = g_lib.pickReturn; g_lib.open = false; g_touchOwned = false; }
 
 // B closes only at the very top; Left goes back but never closes
 void libBack(bool allowClose) {
+	if (g_lib.mode == M_PICK) { g_lib.mode = g_lib.pickReturn; return; }
 	if (g_lib.mode == M_FOLDERS) {
 		const std::string par = player::parentPath(g_lib.dir);
 		if (!par.empty()) libEnter(par, g_lib.dir);
 		else libShowMenu();
 	}
-	else if (g_lib.stack.size() > 1) g_lib.stack.pop_back();
+	else if (g_lib.stack.size() > 1) { g_lib.stack.pop_back(); if (g_lib.stack.size() == 1) libUpdatePlaylistCount(); }
 	else if (allowClose) libClose();
 }
 
@@ -1035,10 +1115,11 @@ void libRefreshHome() {
 	const bool scan = library::scanning();
 	if (!h.dirty && h.builtVersion == library::version() && h.builtScanning == scan && (!scan || h.builtDone == library::scanDone())) return;
 	View nv = makeHome(h.plCount);
-	nv.sel = h.sel;
+	nv.sel = std::min(std::max(h.sel, 0), (int)nv.rows.size() - 1); // a row may have disappeared (sleep timer option)
 	nv.scroll = h.scroll;
 	nv.scrollDisp = h.scrollDisp;
 	h = std::move(nv);
+	clampScroll(g_lib.stack[0]);
 }
 
 std::vector<std::string> pathsOf(const library::Snapshot& s, const std::vector<int>& idx) {
@@ -1048,22 +1129,188 @@ std::vector<std::string> pathsOf(const library::Snapshot& s, const std::vector<i
 	return out;
 }
 
+// ---- naming playlists with the Switch's on-screen keyboard
+const char* const BAD_NAME_CHARS = "/\\:*?\"<>|"; // not allowed in file names on the SD card
+
+// Called by the keyboard when the user presses OK: refuses names that cannot be a file name
+SwkbdTextCheckResult checkPlaylistName(char* text, size_t size) {
+	bool blank = true;
+	for (const char* c = text; *c; c++) {
+		if (strchr(BAD_NAME_CHARS, *c)) {
+			snprintf(text, size, "A name can't contain  / \\ : * ? \" < > |");
+			return SwkbdTextCheckResult_Bad;
+		}
+		if (*c != ' ') blank = false;
+	}
+	if (blank) {
+		snprintf(text, size, "Please type a name.");
+		return SwkbdTextCheckResult_Bad;
+	}
+	return SwkbdTextCheckResult_OK;
+}
+
+// Tidies a name for use as a file name (the keyboard check normally makes this a no-op)
+std::string cleanPlaylistName(const std::string& in) {
+	std::string out;
+	for (char c : in) if (!strchr(BAD_NAME_CHARS, c) && (unsigned char)c >= 0x20) out += c;
+	while (!out.empty() && (out.back() == ' ' || out.back() == '.')) out.pop_back();
+	size_t a = 0;
+	while (a < out.size() && out[a] == ' ') a++;
+	return out.substr(a);
+}
+
+enum NameResult { NAME_OK, NAME_CANCELLED, NAME_UNAVAILABLE };
+
+// Opens the keyboard. NAME_UNAVAILABLE means it could not be shown at all (e.g. the app was launched in a way
+// that does not allow applets), so the caller can fall back to an automatic name.
+NameResult askPlaylistName(const char* header, const std::string& initial, std::string& out) {
+	SwkbdConfig kbd;
+	if (R_FAILED(swkbdCreate(&kbd, 0))) return NAME_UNAVAILABLE;
+	swkbdConfigMakePresetDefault(&kbd);
+	swkbdConfigSetHeaderText(&kbd, header);
+	swkbdConfigSetGuideText(&kbd, "Playlist name");
+	swkbdConfigSetOkButtonText(&kbd, "Save");
+	swkbdConfigSetInitialText(&kbd, initial.c_str());
+	swkbdConfigSetStringLenMax(&kbd, 48);
+	swkbdConfigSetTextCheckCallback(&kbd, checkPlaylistName);
+
+	char buf[256] = { 0 };
+	const u64 t0 = armGetSystemTick();
+	const ::Result rc = swkbdShow(&kbd, buf, sizeof(buf));
+	const double secs = (double)(armGetSystemTick() - t0) / (double)armGetSystemTickFreq();
+	swkbdClose(&kbd);
+
+	if (R_FAILED(rc)) return secs < 0.3 ? NAME_UNAVAILABLE : NAME_CANCELLED; // an instant failure = it never opened
+	out = cleanPlaylistName(buf);
+	return out.empty() ? NAME_CANCELLED : NAME_OK;
+}
+
+// "<dir>/<name>.m3u", with " 2", " 3"... added if that file already exists
+std::string uniquePlaylistPath(const std::string& name, std::string& finalName) {
+	const std::string dir = library::playlistsDir();
+	for (int i = 1; i < 10000; i++) {
+		finalName = (i == 1) ? name : name + " " + std::to_string(i);
+		const std::string path = dir + "/" + finalName + ".m3u";
+		struct stat st;
+		if (stat(path.c_str(), &st) != 0) return path;
+	}
+	finalName = name;
+	return dir + "/" + name + ".m3u";
+}
+
+// First free "Playlist N" (the keyboard's suggestion, and the fallback name)
+std::string suggestPlaylistName() {
+	std::string n;
+	uniquePlaylistPath("Playlist", n);
+	return n == "Playlist" ? "Playlist 1" : n;
+}
+
 void saveQueueAsPlaylist() {
-	const std::vector<std::string> q = player::queuePaths();
-	if (q.empty()) { showToast("The queue is empty"); return; }
+	const std::vector<std::string> q = player::chosenQueuePaths(); // not the tracks the player loaded by itself
+	if (q.empty()) { showToast("You haven't queued anything yet"); return; }
 	mkdir("sdmc:/switch/shaderfun", 0777);
 	mkdir(library::playlistsDir().c_str(), 0777);
 	char stamp[48];
 	time_t now = time(nullptr);
 	strftime(stamp, sizeof(stamp), "%Y-%m-%d %H-%M", localtime(&now));
-	const std::string name = std::string("Queue ") + stamp;
-	if (library::savePlaylist(library::playlistsDir() + "/" + name + ".m3u", q)) {
+	const std::string stampName = std::string("Queue ") + stamp;
+	std::string wanted;
+	const NameResult nr = askPlaylistName("Name this playlist", stampName, wanted);
+	if (nr == NAME_CANCELLED) { showToast("Cancelled - no playlist was made"); return; }
+	if (nr == NAME_UNAVAILABLE) wanted = stampName;
+	std::string name;
+	const std::string savePath = uniquePlaylistPath(wanted, name);
+	if (library::savePlaylist(savePath, q)) {
 		showToast("Saved playlist: " + name);
 		if (!g_lib.stack.empty()) g_lib.stack.back() = makePlaylistsView(); // show it
+		libUpdatePlaylistCount();
 	}
 	else {
 		showToast("Could not save the playlist");
 	}
+}
+
+void libDeletePlaylist(const std::string& path, const std::string& name) {
+	if (!library::deletePlaylist(path)) { showToast("Could not delete the playlist"); return; }
+	if (g_lib.stack.size() > 1) g_lib.stack.pop_back(); // leave the deleted playlist's page
+	if (g_lib.stack.size() > 1 && g_lib.stack.back().kind == PG_PLAYLISTS) {
+		const int oldSel = g_lib.stack.back().sel;
+		View nv = makePlaylistsView();
+		nv.sel = std::min(std::max(oldSel, 0), (int)nv.rows.size() - 1);
+		g_lib.stack.back() = std::move(nv);
+		ensureVisible(g_lib.stack.back());
+		g_lib.stack.back().scrollDisp = g_lib.stack.back().scroll;
+	}
+	libUpdatePlaylistCount();
+	showToast("Deleted playlist: " + name);
+}
+
+// target empty = make a new playlist ("Playlist 1", "Playlist 2"...). paths is a copy on purpose: the picker page goes away here.
+void libCompleteAdd(const std::string& targetPath, const std::string& targetName, std::vector<std::string> paths) {
+	std::string path = targetPath, name = targetName;
+	int added;
+	if (path.empty()) {
+		mkdir("sdmc:/switch/shaderfun", 0777);
+		mkdir(library::playlistsDir().c_str(), 0777);
+		std::string wanted;
+		const NameResult nr = askPlaylistName("Name your new playlist", suggestPlaylistName(), wanted);
+		if (nr == NAME_CANCELLED) { showToast("Cancelled - no playlist was made"); return; }
+		if (nr == NAME_UNAVAILABLE) wanted = suggestPlaylistName(); // keyboard could not open: automatic name
+		path = uniquePlaylistPath(wanted, name);
+		added = library::savePlaylist(path, paths) ? (int)paths.size() : -1;
+	}
+	else {
+		added = library::appendToPlaylist(path, paths);
+	}
+	if (added < 0) { showToast("Could not write the playlist"); return; }
+
+	g_lib.mode = g_lib.pickReturn; // back to the page we came from
+	if (g_lib.mode == M_MENU && !g_lib.stack.empty()) {
+		View& u = g_lib.stack.back(); // refresh it if it shows the playlist (or the list of playlists) we just changed
+		const int sel = u.sel;
+		const float sc = u.scroll;
+		bool rebuilt = false;
+		if (u.kind == PG_PLAYLIST && u.playlistPath == path) { const std::string t = u.title; u = makePlaylistView(path, t); rebuilt = true; }
+		else if (u.kind == PG_PLAYLISTS) { u = makePlaylistsView(); rebuilt = true; }
+		if (rebuilt) {
+			u.sel = std::min(std::max(sel, 0), (int)u.rows.size() - 1);
+			u.scroll = sc;
+			ensureVisible(u);
+			u.scrollDisp = u.scroll;
+		}
+	}
+	libUpdatePlaylistCount();
+	showToast(added == 0 ? "Already in " + name
+		: "Added " + (added == 1 ? std::string("1 track") : std::to_string(added) + " tracks") + " to " + name);
+}
+
+void libRenamePlaylist() {
+	View& v = cur();
+	std::string wanted;
+	const NameResult nr = askPlaylistName("Rename playlist", v.title, wanted);
+	if (nr == NAME_UNAVAILABLE) { showToast("The keyboard could not be opened"); return; }
+	if (nr == NAME_CANCELLED || wanted == v.title) return;
+	struct stat st;
+	// keep the file where it is: same folder, new name
+	const std::string dir = player::parentPath(v.playlistPath);
+	const std::string target = dir + "/" + wanted + ".m3u";
+	if (stat(target.c_str(), &st) == 0) { showToast("A playlist called \"" + wanted + "\" already exists"); return; }
+	if (!library::renamePlaylist(v.playlistPath, target)) { showToast("Could not rename the playlist"); return; }
+	v.title = wanted;
+	v.playlistPath = target;
+	if (g_lib.stack.size() >= 2) { // update the list of playlists underneath
+		View& u = g_lib.stack[g_lib.stack.size() - 2];
+		if (u.kind == PG_PLAYLISTS) {
+			const int sel = u.sel;
+			const float sc = u.scroll;
+			u = makePlaylistsView();
+			u.sel = std::min(std::max(sel, 0), (int)u.rows.size() - 1);
+			u.scroll = sc;
+			ensureVisible(u);
+			u.scrollDisp = u.scroll;
+		}
+	}
+	showToast("Renamed to: " + wanted);
 }
 
 void libActivate(int idx) {
@@ -1096,9 +1343,20 @@ void libActivate(int idx) {
 	case R_HOME_ALBUMS: libPush(makeGroupList(PG_ALBUMS)); break;
 	case R_HOME_ARTISTS: libPush(makeGroupList(PG_ARTISTS)); break;
 	case R_HOME_GENRES: libPush(makeGroupList(PG_GENRES)); break;
-	case R_HOME_PLAYLISTS: libPush(makePlaylistsView()); break;
+	case R_HOME_PLAYLISTS: libUpdatePlaylistCount(); libPush(makePlaylistsView()); break;
 	case R_HOME_ALL: libPush(makeAllSongs()); break;
 	case R_HOME_AUTO: cycleAuto(); if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; break;
+	case R_HOME_SLEEPACT:
+		player::setConfigInt("sleep_quit", player::configInt("sleep_quit", 1) ? 0 : 1);
+		showToast(player::configInt("sleep_quit", 1) ? "Sleep timer: pauses the music, then closes the app" : "Sleep timer: only pauses the music");
+		if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true;
+		break;
+	case R_HOME_SLEEP: cycleSleep(); if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; break;
+	case R_HOME_RESUME:
+		player::setConfigInt("resume_play", player::configInt("resume_play", 0) ? 0 : 1);
+		showToast(player::configInt("resume_play", 0) ? "On launch: music continues playing" : "On launch: music is ready but paused");
+		if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true;
+		break;
 	case R_HOME_RESCAN:
 		library::startScan(player::musicFolder());
 		showToast("Scanning the music folder...");
@@ -1108,6 +1366,17 @@ void libActivate(int idx) {
 	case R_GENRE: { const library::Group g = v.groups[row.ref]; auto snap = v.snap; libPush(makeGenreView(snap, g)); break; }
 	case R_PLAYLIST: libPush(makePlaylistView(row.path, row.label)); break;
 	case R_SAVEQUEUE: saveQueueAsPlaylist(); break;
+	case R_NEWPLAYLIST: libCompleteAdd("", "", v.trackPaths); break;
+	case R_PICKPLAYLIST: libCompleteAdd(row.path, row.label, v.trackPaths); break;
+	case R_RENAMEPLAYLIST: libRenamePlaylist(); break;
+	case R_DELPLAYLIST:
+		if (!v.confirmDelete) { // first press only asks; the second one deletes
+			v.confirmDelete = true;
+			v.rows[idx].label = "Press A again to delete it for good";
+			showToast("Move away to cancel, or press A again to delete");
+		}
+		else libDeletePlaylist(v.playlistPath, v.title); // v is gone after this
+		break;
 	case R_PLAYALL:
 		if (player::playTracks(v.trackPaths, 0)) { showToast("Playing: " + v.title); libClose(); }
 		else showToast("Nothing to play here");
@@ -1153,17 +1422,35 @@ void libQueueSelected(bool playNext) {
 		(added > 1 ? " (" + std::to_string(added) + " tracks)" : ""));
 }
 
+// ---- add to playlist (R3): the highlighted song / album / artist / genre / folder goes into a playlist of your choice
+void libAddToPlaylistPicker() {
+	if (g_lib.mode == M_PICK) return;
+	View& v = cur();
+	if (v.sel < 0 || v.sel >= (int)v.rows.size()) return;
+	std::vector<std::string> paths;
+	std::string name;
+	if (!rowTracks(v, v.rows[v.sel], paths, name)) {
+		showToast("Highlight a song, album, artist, genre or folder to add it to a playlist");
+		return;
+	}
+	if (paths.empty()) { showToast("Nothing to add there"); return; }
+	g_lib.pickReturn = g_lib.mode;
+	g_lib.pick = makePickPlaylistView(paths, name);
+	g_lib.mode = M_PICK;
+	clampScroll(g_lib.pick);
+	ensureVisible(g_lib.pick);
+	g_lib.pick.scrollDisp = g_lib.pick.scroll;
+}
+
 // ---- jump by letter (right stick left/right): previous / next first letter in the list
 char rowLetter(const Row& r) {
 	switch (r.kind) {
-	case R_DIR: case R_FILE: case R_TRACK: case R_ALBUM: case R_ARTIST: case R_GENRE: case R_PLAYLIST: break;
+	case R_DIR: case R_FILE: case R_TRACK: case R_ALBUM: case R_ARTIST: case R_GENRE: case R_PLAYLIST: case R_PICKPLAYLIST: break;
 	default: return 0; // Back / Play all / home rows etc. do not belong to a letter
 	}
-	for (unsigned char c : r.label) {
-		if (c >= 0x80) return '#';
-		if (isalpha(c)) return (char)toupper(c);
-		if (isdigit(c)) return '#';
-	}
+	if (r.label.empty()) return '#';
+	const unsigned char c = (unsigned char)r.label[0];
+	if (c < 0x80 && isalpha(c)) return (char)toupper(c);
 	return '#';
 }
 
@@ -1352,6 +1639,86 @@ void infoLoad() {
 
 void closeInfo() { g_info.open = false; }
 
+// ---- lyrics: timed lyrics slide past over the visuals, plain lyrics open as a page you can scroll
+struct LyricsState {
+	std::string forPath;        // the song the loaded lyrics belong to
+	lyrics::Lyrics data;
+	bool wanted = false;        // switched on with the right stick
+	float alpha = 0.0f;         // fade in / out
+	float linePos = 0.0f;       // smoothed (fractional) index of the line being sung, for the sliding animation
+	float scroll = 0.0f;        // page: scroll offset in pixels
+} g_lyr;
+
+const float LYR_AREA_TOP = 140.0f;
+const Color LYR_CURRENT = { 1.00f, 0.92f, 0.35f, 1.0f }; // the line being sung (yellow)
+const Color LYR_NEXT = { 0.62f, 1.00f, 0.50f, 1.0f };    // the line coming up next (light green)
+
+bool lyricsTimedVisible() { return g_lyr.wanted && g_lyr.data.found && g_lyr.data.timed && !g_lib.open && !g_info.open && player::hasTracks(); }
+bool lyricsPageVisible() { return g_lyr.wanted && g_lyr.data.found && !g_lyr.data.timed && !g_lib.open && !g_info.open && player::hasTracks(); }
+float lyricsLineH() { return g_fontH[SZ_NORMAL] + 5.0f; }
+float lyricsMaxScroll() {
+	const float areaH = (float)g_h - 70.0f - LYR_AREA_TOP;
+	return fmaxf(0.0f, (float)g_lyr.data.plain.size() * lyricsLineH() - areaH);
+}
+
+// (re)loads the lyrics when another song starts
+void lyricsRefresh() {
+	const std::string path = player::hasTracks() ? player::currentPath() : std::string();
+	if (path == g_lyr.forPath) return;
+	g_lyr.forPath = path;
+	g_lyr.data = lyrics::Lyrics();
+	g_lyr.linePos = 0.0f;
+	g_lyr.scroll = 0.0f;
+	if (!path.empty()) lyrics::load(path, g_lyr.data);
+	if (g_lyr.data.found && !g_lyr.data.timed) g_lyr.wanted = false; // a page does not open by itself on the next song
+}
+
+void drawLyrics() {
+	if (g_lyr.alpha < 0.01f) return;
+	g_alpha = g_lyr.alpha;
+	const lyrics::Lyrics& L = g_lyr.data;
+	const Color shadow = { 0.0f, 0.0f, 0.0f, 0.85f };
+
+	if (L.timed) {
+		const float cx = g_w * 0.5f, baseY = 318.0f, step = 56.0f, maxW = g_w - 200.0f;
+		// soft backing so any shader stays readable: tall enough for two lines above and two below the current one
+		rrect(110, baseY - 160, g_w - 220.0f, 320, 26, { 0.0f, 0.0f, 0.0f, 0.58f }); //lyrics box
+		const int curIdx = (int)floorf(g_lyr.linePos + 0.5f); // the line nearest the middle of the box
+		const int first = (int)floorf(g_lyr.linePos) - 2;
+		for (int i = first; i <= first + 6; i++) {
+			if (i < 0 || i >= (int)L.lines.size() || L.lines[i].text.empty()) continue;
+			const float rel = (float)i - g_lyr.linePos;
+			const float dist = fabsf(rel);
+			const float a = fminf(1.0f, fmaxf(0.0f, 1.0f - dist * 0.36f));
+			const int sz = dist < 0.5f ? SZ_TITLE : SZ_NORMAL;
+			const float y = baseY + rel * step - g_fontH[sz] * 0.5f;
+			const bool isNext = (i == curIdx + 1);
+			const Color col = dist < 0.5f ? withA(LYR_CURRENT, a)
+				: isNext ? withA(LYR_NEXT, fmaxf(a, 0.85f)) // the upcoming line stays clearly readable
+				: withA(C_DIM, a);
+			drawText(sz, cx + 2, y + 2, L.lines[i].text, withA(shadow, a), maxW, CENTER);
+			drawText(sz, cx, y, L.lines[i].text, col, maxW, CENTER);
+		}
+		return;
+	}
+
+	// plain lyrics: a page
+	rrect(0, 0, (float)g_w, (float)g_h, 0, { 0.01f, 0.02f, 0.04f, 0.88f });
+	drawText(SZ_TITLE, 60, 14, "Lyrics", C_WHITE);
+	drawText(SZ_SMALL, 62, 66, player::title(), C_DIM, g_w - 400.0f);
+	drawText(SZ_SMALL, g_w - 60.0f, 66, "Up / Down: scroll     B: close", C_DIM, 0, RIGHT);
+	rrect(60, 100, g_w - 120.0f, 1, 0, withA(C_WHITE, 0.12f));
+
+	const float areaBottom = (float)g_h - 70.0f, lineH = lyricsLineH();
+	g_lyr.scroll = fminf(fmaxf(g_lyr.scroll, 0.0f), lyricsMaxScroll());
+	for (size_t i = 0; i < L.plain.size(); i++) {
+		const float y = LYR_AREA_TOP + i * lineH - g_lyr.scroll;
+		if (y < LYR_AREA_TOP - 2.0f || y + lineH > areaBottom + 2.0f) continue;
+		drawText(SZ_NORMAL, 80, y, L.plain[i], C_WHITE, g_w - 160.0f);
+	}
+}
+
+
 void toggleInfo() {
 	if (g_info.open) { closeInfo(); return; }
 	if (g_lib.open) return;
@@ -1415,6 +1782,19 @@ void addFontMemory(const void* data, size_t size) {
 bool ready() { return g_ready; }
 bool libraryOpen() { return g_lib.open; }
 bool infoOpen() { return g_info.open; }
+bool lyricsAvailable() { return g_lyr.data.found; }
+void lyricsShow(bool show) {
+	if (!g_ready) return;
+	if (show) {
+		if (!g_lyr.data.found) { showToast("No lyrics found for this song"); return; }
+		g_lyr.wanted = true;
+		showToast(g_lyr.data.timed ? "Lyrics on" : "Lyrics - Up / Down to scroll, B to close");
+	}
+	else if (g_lyr.wanted) {
+		g_lyr.wanted = false;
+		showToast("Lyrics off");
+	}
+}
 int autoCycleSeconds() { return g_autoSecs; }
 void toast(const std::string& text) { if (g_ready) showToast(text); }
 
@@ -1537,6 +1917,37 @@ Result update(const Input& in) {
 	}
 	g_toastTimer = fmaxf(0.0f, g_toastTimer - dt);
 
+	// ---- sleep timer
+	{
+		if (g_quitCountdown > 0.0f) { // about to close: any button, touch or playing music cancels it
+			if (in.down || in.touching || player::isPlaying()) { g_quitCountdown = 0.0f; showToast("Staying open"); }
+			else {
+				g_quitCountdown -= dt;
+				if (g_quitCountdown <= 0.0f) { g_quitCountdown = 0.0f; res.requestQuit = true; }
+			}
+		}
+		if (player::consumeSleepFired()) {
+			g_sleepStep = 0;
+			if (player::configInt("sleep_quit", 1)) {
+				showToast("Sleep timer: music paused. Closing in 5 s - press any button to stay");
+				g_toastTimer = 5.0f;
+				g_quitCountdown = 5.0f;
+			}
+			else showToast("Sleep timer: music paused. Good night!");
+			appletSetMediaPlaybackState(false); // the Switch may now go to sleep on its own (main.cpp had blocked that)
+			g_mediaStateReleased = true;
+		}
+		if (g_mediaStateReleased && player::isPlaying()) { // music is back: keep the console awake again
+			appletSetMediaPlaybackState(true);
+			g_mediaStateReleased = false;
+		}
+		if (g_lib.open && !g_lib.stack.empty()) { // keep the "minutes left" text on the home page up to date
+			static std::string lastLabel;
+			const std::string now = sleepLabel();
+			if (now != lastLabel) { lastLabel = now; g_lib.stack[0].dirty = true; }
+		}
+	}
+
 	// ---- touch: begin
 	static float startScroll = 0.0f;
 	if (touchDown) {
@@ -1624,6 +2035,13 @@ Result update(const Input& in) {
 		if (g_repPgUp.fire(d & BTN_LS_LEFT, h & BTN_LS_LEFT, dt, 0.4f, 0.14f)) libMove(-LIB_PAGE_ROWS);
 		if (d & BTN_LS_UP) libJumpTo(0);
 		if (d & BTN_LS_DOWN) libJumpTo((int)cur().rows.size() - 1);
+		{ // a pending "delete playlist" confirmation is cancelled as soon as the selection leaves that row
+			View& cv = cur();
+			if (cv.confirmDelete && (cv.sel < 0 || cv.sel >= (int)cv.rows.size() || cv.rows[cv.sel].kind != R_DELPLAYLIST)) {
+				cv.confirmDelete = false;
+				for (Row& r : cv.rows) if (r.kind == R_DELPLAYLIST) r.label = "Delete this playlist";
+			}
+		}
 		if (d & BTN_RS_RIGHT) libJumpLetter(+1);
 		if (d & BTN_RS_LEFT) libJumpLetter(-1);
 		if (d & BTN_L3) libQueueSelected(false);
@@ -1637,7 +2055,7 @@ Result update(const Input& in) {
 		if (d & BTN_R) libJumpMusicFolder();
 		if (d & BTN_ZL) player::prev();
 		if (d & BTN_ZR) player::next();
-		if (d & BTN_R3) { player::cycleMode(); showToast(player::modeName(player::mode())); }
+		if (d & BTN_R3) libAddToPlaylistPicker();
 	}
 	else {
 		res.consumedButtons = BTN_A | BTN_ZL | BTN_ZR | BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT | BTN_Y | BTN_R3 | BTN_L3 | (g_info.open ? BTN_B : 0u);
@@ -1646,7 +2064,16 @@ Result update(const Input& in) {
 		if (d & BTN_ZR) player::next();
 		if (d & BTN_LEFT) player::seekBy(-10);
 		if (d & BTN_RIGHT) player::seekBy(10);
-		if (g_repVol.fire(d & (BTN_UP | BTN_DOWN), h & (BTN_UP | BTN_DOWN), dt, 0.3f, 0.09f)) {
+		const bool lyrPage = lyricsPageVisible();
+		if (lyrPage) { // Up / Down scroll the lyrics instead of changing the volume
+			res.consumedButtons |= BTN_B;
+			float dir = 0.0f;
+			if (h & (BTN_UP | BTN_LS_UP)) dir -= 1.0f;
+			if (h & (BTN_DOWN | BTN_LS_DOWN)) dir += 1.0f;
+			g_lyr.scroll = fminf(fmaxf(g_lyr.scroll + dir * 640.0f * dt, 0.0f), lyricsMaxScroll());
+			if (d & BTN_B) lyricsShow(false);
+		}
+		if (!lyrPage && g_repVol.fire(d & (BTN_UP | BTN_DOWN), h & (BTN_UP | BTN_DOWN), dt, 0.3f, 0.09f)) {
 			const int dir = (h & BTN_UP) ? +1 : -1;
 			player::setVolume(player::volume() + dir * 8);
 			char buf[48];
@@ -1659,8 +2086,20 @@ Result update(const Input& in) {
 		if (d & BTN_Y) { closeInfo(); libOpenNow(); }
 	}
 
+	// ---- lyrics
+	lyricsRefresh();
+	{
+		const bool timedShown = lyricsTimedVisible(), pageShown = lyricsPageVisible();
+		g_lyr.alpha += (((timedShown || pageShown) ? 1.0f : 0.0f) - g_lyr.alpha) * fminf(1.0f, dt * 8.0f);
+		if (timedShown) {
+			const bool running = player::isPlaying() || player::isPaused();
+			const int idx = running ? lyrics::lineAt(g_lyr.data, player::position()) : -1;
+			g_lyr.linePos += ((float)idx - g_lyr.linePos) * fminf(1.0f, dt * 9.0f);
+		}
+	}
+
 	// ---- animation
-	const float target = (g_hudTimer > 0.0f && !g_lib.open && !g_info.open) ? 1.0f : 0.0f;
+	const float target = (g_hudTimer > 0.0f && !g_lib.open && !g_info.open && !lyricsPageVisible()) ? 1.0f : 0.0f;
 	g_hudAlpha += (target - g_hudAlpha) * fminf(1.0f, dt * 9.0f);
 	g_lib.slide += ((g_lib.open ? 1.0f : 0.0f) - g_lib.slide) * fminf(1.0f, dt * 12.0f);
 	if (fabsf(g_lib.slide - (g_lib.open ? 1.0f : 0.0f)) < 0.003f) g_lib.slide = g_lib.open ? 1.0f : 0.0f;
@@ -1740,6 +2179,22 @@ void drawHud() {
 		}
 	}
 
+	// sleep timer: only shown while one is running (counts down, or says it waits for the end of the track)
+	if (player::sleepActive()) {
+		std::string label;
+		if (player::sleepAtTrackEnd()) label = "Sleep: after this track";
+		else {
+			const int secs = player::sleepSecondsLeft();
+			char buf[32];
+			if (secs >= 3600) snprintf(buf, sizeof(buf), "%dh %02dm", secs / 3600, (secs % 3600) / 60);
+			else snprintf(buf, sizeof(buf), "%d:%02d", secs / 60, secs % 60);
+			label = std::string(player::sleepFading() ? "Sleep: fading " : "Sleep: ") + buf;
+		}
+		const float w = textWidth(SZ_SMALL, label) + 28.0f, h = 30.0f, right = 1042.0f, cy = 584.0f;
+		rrect(right - w, cy - h * 0.5f, w, h, h * 0.5f, withA(C_ACCENT, 0.20f));
+		drawText(SZ_SMALL, right - w + 14.0f, cy - g_fontH[SZ_SMALL] * 0.5f, label, C_ACCENT);
+	}
+
 	// transport buttons
 	struct B { Target t; float cx; Icon ic; float r, isz; bool enabled; };
 	const B btns[] = {
@@ -1814,7 +2269,10 @@ void drawLibrary() {
 		case R_UP: ic = IC_UP; iconCol = textCol = C_DIM; break;
 		case R_BACK: ic = IC_BACK; iconCol = textCol = C_DIM; break;
 		case R_PLAYDIR: case R_PLAYALL: ic = IC_PLAY; iconCol = textCol = C_ACCENT; break;
-		case R_SAVEQUEUE: ic = IC_PLAYLIST; iconCol = textCol = C_ACCENT; break;
+		case R_SAVEQUEUE: case R_NEWPLAYLIST: ic = IC_PLAYLIST; iconCol = textCol = C_ACCENT; break;
+		case R_PICKPLAYLIST: ic = IC_PLAYLIST; iconCol = C_ACCENT; break;
+		case R_RENAMEPLAYLIST: ic = IC_PLAYLIST; iconCol = textCol = C_ACCENT; break;
+		case R_DELPLAYLIST: { const Color red = { 1.0f, 0.45f, 0.45f, 1.0f }; ic = IC_CLOSE; iconCol = red; textCol = red; break; }
 		case R_SETDIR: ic = IC_STAR; iconCol = textCol = isMusicFolder ? C_ACCENT : C_DIM; break;
 		case R_DIR: ic = isMusicFolder ? IC_STAR : IC_FOLDER; iconCol = isMusicFolder ? C_ACCENT : folderYellow; break;
 		case R_FILE: case R_TRACK: ic = isPlaying ? IC_PLAY : IC_NOTE; iconCol = textCol = isPlaying ? C_ACCENT : C_WHITE; break;
@@ -1825,6 +2283,9 @@ void drawLibrary() {
 		case R_HOME_PLAYLISTS: case R_PLAYLIST: ic = IC_PLAYLIST; iconCol = C_ACCENT; break;
 		case R_HOME_ALL: ic = IC_NOTE; iconCol = C_ACCENT; break;
 		case R_HOME_AUTO: ic = IC_VIZ; iconCol = g_autoSecs ? C_ACCENT : C_DIM; break;
+		case R_HOME_SLEEPACT: ic = IC_CLOSE; iconCol = C_DIM; break;
+		case R_HOME_SLEEP: ic = IC_PAUSE; iconCol = player::sleepActive() ? C_ACCENT : C_DIM; break;
+		case R_HOME_RESUME: ic = IC_PLAY; iconCol = C_DIM; break;
 		case R_HOME_RESCAN: ic = IC_REPEAT; iconCol = C_DIM; textCol = C_DIM; break;
 		}
 		if (sel && textCol.r == C_DIM.r) textCol = C_WHITE;
@@ -2075,6 +2536,7 @@ void draw() {
 	g_v.clear();
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, g_atlasTex);
+	drawLyrics();
 	drawHud();
 	drawLibrary();
 	drawInfo();

@@ -31,6 +31,9 @@ State g_state = STOPPED;
 
 std::vector<std::string> g_queue;  // tracks in "natural" order
 std::vector<int> g_order;          // play order: indices into g_queue
+bool g_keepQueue = false;          // remember this queue for the next launch (it was made by the user, not the automatic start-up queue)
+bool g_queueDirty = false;         // the queue changed since last_queue.txt was written
+std::vector<char> g_chosen;        // parallel to g_queue: 1 = the user picked it, 0 = loaded automatically (start-up / idle folder queue)
 int g_pos = -1;                    // index into g_order
 
 std::string g_title, g_artist, g_album; // tags of the loaded track
@@ -178,9 +181,55 @@ int currentQueueIndex() {
 	return (g_pos >= 0 && g_pos < (int)g_order.size()) ? g_order[g_pos] : -1;
 }
 
-void setQueue(const std::vector<std::string>& tracks, int startIndex) {
+void setQueue(const std::vector<std::string>& tracks, int startIndex, bool userChosen = true) {
 	g_queue = tracks;
+	g_chosen.assign(tracks.size(), userChosen ? 1 : 0);
+	g_keepQueue = userChosen;
+	g_queueDirty = true;
 	rebuildOrder(startIndex);
+}
+
+// ---- sleep timer state
+const Uint32 SLEEP_FADE_MS = 15000;
+float g_fade = 1.0f;             // 1 = normal volume, fades to 0 as the sleep timer runs out
+bool g_sleepOn = false;
+bool g_sleepAtTrackEnd = false;
+bool g_sleepFired = false;
+Uint32 g_sleepEnd = 0;           // SDL tick when the timer runs out
+
+int effVol() { return (int)(g_volume * g_fade + 0.5f); } // what is actually sent to the mixer
+
+std::string queueFilePath() {
+	return g_configPath.empty() ? std::string() : parentPath(g_configPath) + "/last_queue.txt";
+}
+
+// Only a queue that contains tracks YOU chose is kept. An untouched start-up queue is simply rebuilt from the music folder.
+void writeQueueFile() {
+	const std::string path = queueFilePath();
+	if (path.empty()) return;
+	bool any = false;
+	for (char c : g_chosen) if (c) { any = true; break; }
+	if (!any && !g_keepQueue) { remove(path.c_str()); return; } // an untouched automatic queue is just rebuilt next time
+	std::ofstream f(path);
+	if (!f.is_open()) return;
+	f << "#SHADERFUN-QUEUE 1\n";
+	for (size_t i = 0; i < g_queue.size(); i++) f << ((i < g_chosen.size() && g_chosen[i]) ? '1' : '0') << '|' << g_queue[i] << '\n';
+}
+
+bool readQueueFile(std::vector<std::string>& tracks, std::vector<char>& chosen) {
+	const std::string path = queueFilePath();
+	if (path.empty()) return false;
+	std::ifstream f(path);
+	if (!f.is_open()) return false;
+	std::string line;
+	if (!std::getline(f, line) || line.compare(0, 18, "#SHADERFUN-QUEUE 1") != 0) return false;
+	while (std::getline(f, line)) {
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		if (line.size() < 3 || line[1] != '|') continue;
+		chosen.push_back(line[0] == '1' ? 1 : 0);
+		tracks.push_back(line.substr(2));
+	}
+	return !tracks.empty();
 }
 
 void freeMusic() {
@@ -227,7 +276,7 @@ bool loadCurrent() {
 		g_music = nullptr;
 		return false;
 	}
-	Mix_VolumeMusic(g_volume);
+	Mix_VolumeMusic(effVol());
 	fillMetadata();
 	g_state = PLAYING;
 	g_basePos = 0.0;
@@ -267,6 +316,26 @@ bool step(int delta, bool wrap) {
 }
 
 void onTrackEnded() {
+	if (g_sleepOn && g_sleepAtTrackEnd) { // sleep timer "after this track": line up the next track, but keep it paused
+		g_sleepOn = false;
+		g_sleepAtTrackEnd = false;
+		g_sleepFired = true;
+		const bool moved = (g_mode == MODE_REPEAT_ONE) || step(+1, g_mode != MODE_ONCE);
+		if (moved) {
+			const float f = g_fade;
+			g_fade = 0.0f; // silent, so no blip of the next track
+			if (loadCurrentOrSkip()) pause();
+			g_fade = f;
+			Mix_VolumeMusic(effVol());
+		}
+		else {
+			freeMusic();
+			g_state = STOPPED;
+			g_pos = g_order.empty() ? -1 : 0;
+			fillMetadata();
+		}
+		return;
+	}
 	if (g_mode == MODE_REPEAT_ONE) {
 		loadCurrentOrSkip();
 		return;
@@ -352,29 +421,129 @@ void init(const char* configPath) {
 	loadConfig();
 	Mix_VolumeMusic(g_volume);
 
+	// Queue: the one you chose last time if there was one, otherwise the music folder
 	std::vector<std::string> tracks;
-	scanRecursive(g_musicFolder, tracks, 0);
-	if (tracks.empty()) scanRecursive("romfs:/music", tracks, 0);
-	setQueue(tracks, tracks.empty() ? -1 : 0);
+	std::vector<char> chosen;
+	const bool restoredQueue = readQueueFile(tracks, chosen);
+	if (!restoredQueue) {
+		scanRecursive(g_musicFolder, tracks, 0);
+		if (tracks.empty()) scanRecursive("romfs:/music", tracks, 0);
+	}
+
+	// Which track was current? (by index when it still matches, otherwise by path)
+	const std::string lastPath = g_extra.count("last_track") ? g_extra["last_track"] : std::string();
+	int startIdx = -1;
+	if (!lastPath.empty()) {
+		const int qi = configInt("last_qi", -1);
+		if (qi >= 0 && qi < (int)tracks.size() && tracks[qi] == lastPath) startIdx = qi;
+		else for (size_t i = 0; i < tracks.size(); i++) if (tracks[i] == lastPath) { startIdx = (int)i; break; }
+	}
+
+	setQueue(tracks, tracks.empty() ? -1 : (startIdx >= 0 ? startIdx : 0), false);
+	// The restored queue is kept for next time, but nothing in it counts as "chosen" in THIS session:
+	// "Save my queued songs as a playlist" must only contain what you pick now, not last session's album.
+	g_keepQueue = restoredQueue;
+	g_queueDirty = false;
 	g_state = STOPPED;
+
+	// Get the last track ready at its old position (paused, unless "Resume on launch" is set to playing)
+	struct stat lst;
+	if (startIdx >= 0 && stat(lastPath.c_str(), &lst) == 0) {
+		const int savedVol = g_volume;
+		g_volume = 0; // silent while it loads and seeks, so there is no blip of sound
+		Mix_VolumeMusic(0);
+		if (loadCurrent()) {
+			const double pos = configInt("last_pos_ms", 0) / 1000.0;
+			if (pos > 1.0) seekTo(pos);
+			if (!configInt("resume_play", 0)) pause();
+		}
+		g_volume = savedVol;
+		Mix_VolumeMusic(g_volume);
+	}
 	printf("Player ready: %zu tracks queued from %s\n", g_queue.size(), g_musicFolder.c_str());
 }
 
 void shutdown() {
-	saveConfig();
+	saveState(); // last track, position, queue (before the music is freed)
 	freeMusic();
 	g_state = STOPPED;
 	g_queue.clear();
+	g_chosen.clear();
 	g_order.clear();
 }
 
 void update() {
 	if (g_state == PLAYING && !Mix_PlayingMusic()) onTrackEnded();
+
+	// sleep timer: fade out over the last SLEEP_FADE_MS, then pause
+	if (g_sleepOn && !g_sleepAtTrackEnd) {
+		const int32_t left = (int32_t)(g_sleepEnd - SDL_GetTicks()); // wrap-safe
+		if (left <= 0) {
+			if (g_state == PLAYING) pause();
+			g_fade = 1.0f; // back to normal volume for when you press play again
+			Mix_VolumeMusic(effVol());
+			g_sleepOn = false;
+			g_sleepFired = true;
+		}
+		else if (left < (int32_t)SLEEP_FADE_MS && g_state == PLAYING) {
+			g_fade = (float)left / (float)SLEEP_FADE_MS;
+			Mix_VolumeMusic(effVol());
+		}
+		else if (g_fade != 1.0f) {
+			g_fade = 1.0f;
+			Mix_VolumeMusic(effVol());
+		}
+	}
+}
+
+void setSleepTimer(int minutes) {
+	g_sleepFired = false;
+	g_fade = 1.0f;
+	Mix_VolumeMusic(effVol());
+	if (minutes == 0) { g_sleepOn = false; g_sleepAtTrackEnd = false; return; }
+	g_sleepOn = true;
+	g_sleepAtTrackEnd = (minutes < 0);
+	if (minutes > 0) g_sleepEnd = SDL_GetTicks() + (Uint32)minutes * 60000u;
+}
+
+bool sleepActive() { return g_sleepOn; }
+bool sleepAtTrackEnd() { return g_sleepOn && g_sleepAtTrackEnd; }
+int sleepSecondsLeft() {
+	if (!g_sleepOn || g_sleepAtTrackEnd) return -1;
+	const int32_t left = (int32_t)(g_sleepEnd - SDL_GetTicks());
+	return left > 0 ? (int)(left / 1000) : 0;
+}
+bool sleepFading() { return g_sleepOn && !g_sleepAtTrackEnd && g_fade < 1.0f; }
+bool consumeSleepFired() {
+	const bool f = g_sleepFired;
+	g_sleepFired = false;
+	return f;
 }
 
 int configInt(const char* key, int defaultValue) {
 	auto it = g_extra.find(key);
 	return it == g_extra.end() ? defaultValue : atoi(it->second.c_str());
+}
+
+std::string configString(const char* key, const std::string& defaultValue) {
+	auto it = g_extra.find(key);
+	return it == g_extra.end() ? defaultValue : it->second;
+}
+
+void setConfigString(const char* key, const std::string& value, bool saveNow) {
+	g_extra[key] = value;
+	if (saveNow) saveConfig();
+}
+
+void saveState() {
+	const int qi = currentQueueIndex();
+	if (qi >= 0 && qi < (int)g_queue.size()) {
+		g_extra["last_track"] = g_queue[qi];
+		g_extra["last_qi"] = std::to_string(qi);
+		g_extra["last_pos_ms"] = std::to_string((long)(position() * 1000.0));
+	}
+	if (g_queueDirty) { writeQueueFile(); g_queueDirty = false; }
+	saveConfig();
 }
 
 void setConfigInt(const char* key, int value) {
@@ -391,7 +560,7 @@ void setMusicFolder(const std::string& dir) {
 	if (g_state == STOPPED) { // nothing is playing: load the new folder as the idle queue
 		std::vector<std::string> tracks;
 		scanRecursive(dir, tracks, 0);
-		if (!tracks.empty()) setQueue(tracks, 0);
+		if (!tracks.empty()) setQueue(tracks, 0, false); // idle queue, not chosen by the user
 	}
 }
 
@@ -430,6 +599,13 @@ bool playTracks(const std::vector<std::string>& tracks, int startIndex) {
 
 std::vector<std::string> queuePaths() { return g_queue; }
 
+std::vector<std::string> chosenQueuePaths() {
+	std::vector<std::string> out;
+	for (size_t i = 0; i < g_queue.size(); i++)
+		if (i < g_chosen.size() && g_chosen[i]) out.push_back(g_queue[i]);
+	return out;
+}
+
 std::vector<std::string> tracksInFolder(const std::string& dir) {
 	std::vector<std::string> tracks;
 	scanRecursive(dir, tracks, 0);
@@ -447,6 +623,8 @@ int enqueue(const std::vector<std::string>& tracks, bool playNext) {
 	if (g_mode == MODE_SHUFFLE) {
 		// the new tracks go at the end of g_queue; only the play order decides when they are heard
 		g_queue.insert(g_queue.end(), tracks.begin(), tracks.end());
+		g_chosen.insert(g_chosen.end(), k, 1);
+		g_queueDirty = true;
 		const int at = (playNext && g_pos >= 0) ? g_pos + 1 : (int)g_order.size();
 		std::vector<int> add(k);
 		for (int i = 0; i < k; i++) add[i] = n + i;
@@ -456,6 +634,8 @@ int enqueue(const std::vector<std::string>& tracks, bool playNext) {
 		// in order modes the play order is the queue itself, so insert straight into it
 		const int at = (playNext && g_pos >= 0) ? g_pos + 1 : n;
 		g_queue.insert(g_queue.begin() + at, tracks.begin(), tracks.end());
+		g_chosen.insert(g_chosen.begin() + at, k, 1);
+		g_queueDirty = true;
 		g_order.resize(n + k);
 		for (int i = 0; i < n + k; i++) g_order[i] = i;
 	}
@@ -534,7 +714,7 @@ void seekBy(double seconds) {
 
 void setVolume(int v) {
 	g_volume = std::max(0, std::min(MIX_MAX_VOLUME, v));
-	Mix_VolumeMusic(g_volume);
+	Mix_VolumeMusic(effVol());
 }
 
 void setMode(PlayMode m) {

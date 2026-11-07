@@ -763,6 +763,12 @@ std::string setIndex(int idx) {
 	g_autoRotate = true; // reset to auto when changing model
 	return g_mesh.name;
 }
+std::string currentFileName() {
+	if (g_modelFiles.empty() || g_current < 0 || g_current >= (int)g_modelFiles.size()) return "";
+	const std::string& fn = g_modelFiles[g_current];
+	const size_t slash = fn.find_last_of("/\\");
+	return slash == std::string::npos ? fn : fn.substr(slash + 1);
+}
 std::string next() { return g_modelFiles.empty() ? "" : setIndex(g_current + 1); }
 std::string prev() { return g_modelFiles.empty() ? "" : setIndex(g_current - 1); }
 

@@ -59,5 +59,8 @@ std::string playlistsDir();
 std::vector<Playlist> listPlaylists(const std::string& musicRoot);
 std::vector<std::string> loadPlaylist(const std::string& path);                // only files that exist, in order
 bool savePlaylist(const std::string& path, const std::vector<std::string>& tracks);
+int appendToPlaylist(const std::string& path, const std::vector<std::string>& tracks); // adds tracks that are not in it yet; returns how many were added, -1 on error
+bool deletePlaylist(const std::string& path);
+bool renamePlaylist(const std::string& oldPath, const std::string& newPath);   // same folder, new file name                                  // removes the .m3u file from the SD card
 
 } // namespace library

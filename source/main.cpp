@@ -853,6 +853,17 @@ void rescanShaders(std::vector<std::string>& shaderFiles, int& currentShader) {
 	printf("Rescan complete: Found %zu shaders\n", shaderFiles.size());
 }
 
+// Remembers what is on screen so the next launch starts where this one ended (the player saves the music side itself)
+static void saveVisualState(const std::vector<std::string>& shaderFiles, int currentShader) {
+	player::setConfigString("last_shader",
+		(currentShader >= 0 && currentShader < (int)shaderFiles.size()) ? shaderFiles[currentShader] : std::string(), false);
+	player::setConfigString("last_image",
+		g_imageFiles.empty() ? std::string() : g_imageFiles[g_imageIndex % (int)g_imageFiles.size()], false);
+	player::setConfigString("last_model", model3d::currentFileName(), false);
+	player::setConfigString("last_material", model3d::materialName(), false);
+	player::setConfigInt("last_scroller", g_scrollerEnabled ? 1 : 0); // saves config.ini too
+}
+
 int main(int argc, char* argv[]) {
 	nxlinkStdio(); // log to nxlink if running
 	appletSetMediaPlaybackState(true); // Set media playback state to prevent switch sleeping
@@ -1054,9 +1065,29 @@ int main(int argc, char* argv[]) {
 
 	int currentShader = 0;
 
+	// Pick up where the last session ended: same shader and image
+	{
+		const std::string lastShader = player::configString("last_shader");
+		for (size_t i = 0; i < shaderFiles.size() && !lastShader.empty(); i++)
+			if (shaderFiles[i] == lastShader) { currentShader = (int)i; break; }
+		const std::string lastImage = player::configString("last_image");
+		for (size_t i = 0; i < g_imageFiles.size() && !lastImage.empty(); i++)
+			if (g_imageFiles[i] == lastImage) { g_imageIndex = (int)i; break; }
+	}
+
 	ShaderProgram shader = shaderFiles.empty() ?
 		loadShaderProgram(fallbackFragmentShader) :
 		loadShaderFromFile(shaderFiles[currentShader]);
+
+	// ...and the same model, material and scroller (after the shader, whose directives may have set their own)
+	{
+		const std::string lastModel = player::configString("last_model");
+		if (!lastModel.empty() && model3d::count() > 0) model3d::selectByName(lastModel);
+		const std::string lastMaterial = player::configString("last_material");
+		if (!lastMaterial.empty()) model3d::setMaterialByName(lastMaterial);
+		const int lastScroller = player::configInt("last_scroller", -1);
+		if (lastScroller >= 0 && scroller_ready()) g_scrollerEnabled = (lastScroller != 0);
+	}
 
 	// Add FTP state variable
 	bool ftpEnabled = false;
@@ -1072,6 +1103,16 @@ int main(int argc, char* argv[]) {
 		}
 
 		frameCount++;
+
+		// Save the state every 20 s, so a crash or a power-off loses very little
+		{
+			static Uint32 lastStateSave = SDL_GetTicks();
+			if (SDL_GetTicks() - lastStateSave > 20000) {
+				lastStateSave = SDL_GetTicks();
+				saveVisualState(shaderFiles, currentShader);
+				player::saveState();
+			}
+		}
 
 		padUpdate(&pad);
 		u64 kDown = padGetButtonsDown(&pad);
@@ -1114,6 +1155,7 @@ int main(int argc, char* argv[]) {
 		}
 
 		if (kDown & HidNpadButton_Plus) running = false;
+		if (uiRes.requestQuit) running = false; // sleep timer: close the app (state is saved on the way out)
 
 		// FTP server toggle with Minus button (with debouncing)
 		if (network_available) {
@@ -1193,12 +1235,11 @@ int main(int argc, char* argv[]) {
 		}
 		
 		// 3D model controls (right stick)
-		//  - Horizontal flick: cycle models
+		//  - Horizontal flick: right = show lyrics, left = hide them
 		//  - Vertical: zoom (or free-look pitch when ZL held)
 		//  - Hold ZL + right stick: free-look orbit (disables auto-rotate)
 		//  - Hold ZR + horizontal flick: cycle material preset
 		{
-			static Uint32 lastModelSwitch = 0;
 			static Uint32 lastMatSwitch = 0;
 			static Uint32 lastCamTicks = SDL_GetTicks();
 			const Uint32 nowCam = SDL_GetTicks();
@@ -1219,15 +1260,13 @@ int main(int argc, char* argv[]) {
 
 			model3d::updateCamera(camDt, sx, sy, lookHeld);
 
-			if (!lookHeld && !matHeld && SDL_GetTicks() - lastModelSwitch > 350) {
-				if (stick.x > DEAD && model3d::count() > 0) {
-					std::string name = model3d::next();
-					if (!name.empty()) ui::toast("Model: " + name);
-					lastModelSwitch = SDL_GetTicks();
-				} else if (stick.x < -DEAD && model3d::count() > 0) {
-					std::string name = model3d::prev();
-					if (!name.empty()) ui::toast("Model: " + name);
-					lastModelSwitch = SDL_GetTicks();
+			// Right stick right / left = show / hide the lyrics (one flick each; it has to return to the middle first)
+			{
+				static bool lyricsArmed = true;
+				if (abs(stick.x) < DEAD / 2) lyricsArmed = true;
+				if (lyricsArmed && !lookHeld && !matHeld && !menuOpen) {
+					if (stick.x > DEAD) { lyricsArmed = false; ui::lyricsShow(true); }
+					else if (stick.x < -DEAD) { lyricsArmed = false; ui::lyricsShow(false); }
 				}
 			}
 
@@ -1488,10 +1527,11 @@ int main(int argc, char* argv[]) {
 	// Reset when done
 	appletSetMediaPlaybackState(false); //allow switch to go back to sleep
 	ftp_cleanup(&pad);  // Pass the pad parameter
+	saveVisualState(shaderFiles, currentShader);
 	ui::shutdown();
 	if (plReady) plExit();
 	library::shutdown();
-	player::shutdown();
+	player::shutdown(); // also saves the last track, position and queue
 	cleanupAudio();
 	glDeleteTextures(1, &audioTexWaveform);
 	glDeleteTextures(1, &audioTexSpectrum);

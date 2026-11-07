@@ -225,7 +225,7 @@ void deunsync(std::vector<uint8_t>& v) {
 std::string normalizeFrameId(const std::string& id) {
 	static const char* const map[][2] = {
 		{"TT2","TIT2"}, {"TP1","TPE1"}, {"TAL","TALB"}, {"TP2","TPE2"}, {"TRK","TRCK"}, {"TPA","TPOS"},
-		{"TYE","TYER"}, {"TCO","TCON"}, {"TCM","TCOM"}, {"COM","COMM"}, {"PIC","APIC"} };
+		{"TYE","TYER"}, {"TCO","TCON"}, {"TCM","TCOM"}, {"COM","COMM"}, {"PIC","APIC"}, {"ULT","USLT"} };
 	for (auto& m : map) if (id == m[0]) return m[1];
 	return id;
 }
@@ -270,6 +270,17 @@ void handleComm(const uint8_t* d, size_t n, TrackTags& t) {
 	std::string text = trim(decodeId3(d + tpos, n - tpos, enc));
 	if (text.empty() || desc.compare(0, 4, "iTun") == 0) return;
 	if (t.comment.empty() || desc.empty()) t.comment = text;
+}
+
+// USLT: encoding(1) language(3) descriptor(terminated) lyrics text (rest of the frame)
+void handleUslt(const uint8_t* d, size_t n, TrackTags& t) {
+	if (n < 5 || !t.lyrics.empty()) return;
+	const int enc = d[0];
+	size_t w;
+	const size_t dend = findTerminator(d, n, 4, enc, w);
+	const size_t tpos = dend + w;
+	if (tpos >= n) return;
+	t.lyrics = decodeId3(d + tpos, n - tpos, enc);
 }
 
 void handleTxxx(const uint8_t* d, size_t n, TrackTags& t) {
@@ -324,7 +335,7 @@ uint32_t parseId3v2(Reader& r, TrackTags& t, bool wantCover) {
 	}
 
 	static const char* const interesting[] = { "TIT2", "TPE1", "TALB", "TPE2", "TCOM", "TRCK", "TPOS", "TCON",
-		"TYER", "TDRC", "TDRL", "COMM", "TXXX", "APIC" };
+		"TYER", "TDRC", "TDRL", "COMM", "TXXX", "APIC", "USLT" };
 	const size_t hdr = (ver == 2) ? 6 : 10;
 	int coverType = -1;
 	std::string yearTyer, yearTdrc;
@@ -351,6 +362,7 @@ uint32_t parseId3v2(Reader& r, TrackTags& t, bool wantCover) {
 		bool want = false;
 		for (const char* f : interesting) if (id == f) want = true;
 		if (id == "APIC" && !wantCover) want = false;
+		if (id == "USLT" && !t.wantLyrics) want = false;
 		if (!want || size == 0) continue;
 
 		std::vector<uint8_t> data;
@@ -385,6 +397,7 @@ uint32_t parseId3v2(Reader& r, TrackTags& t, bool wantCover) {
 		else if (id == "TDRC" || id == "TDRL") { setIfEmpty(yearTdrc, textFrameValue(d, n)); any = true; }
 		else if (id == "COMM") { handleComm(d, n, t); any = true; }
 		else if (id == "TXXX") { handleTxxx(d, n, t); }
+		else if (id == "USLT") { handleUslt(d, n, t); }
 		else if (id == "APIC") { handleApic(d, n, ver == 2, t, coverType); any = true; }
 	}
 	if (!yearTdrc.empty()) setIfEmpty(t.year, yearTdrc.substr(0, 10));
@@ -541,6 +554,7 @@ void parseVorbisComments(const uint8_t* p, size_t n, TrackTags& t, bool wantCove
 		else if (key == "DISCNUMBER") setIfEmpty(t.disc, val);
 		else if (key == "DISCTOTAL" || key == "TOTALDISCS") discTotal = val;
 		else if (key == "COMMENT" || key == "DESCRIPTION") setIfEmpty(t.comment, val);
+		else if ((key == "LYRICS" || key == "UNSYNCEDLYRICS") && t.wantLyrics) setIfEmpty(t.lyrics, val);
 		else if (key == "METADATA_BLOCK_PICTURE" && wantCover) {
 			std::vector<uint8_t> pic;
 			b64decode(val, pic);
@@ -732,9 +746,10 @@ std::string extensionOf(const std::string& path) {
 
 std::string base64Decode(const std::string& in, std::vector<uint8_t>& out) { return b64decode(in, out); }
 
-bool read(const std::string& path, TrackTags& t, double durationSeconds, bool light) {
+bool read(const std::string& path, TrackTags& t, double durationSeconds, bool light, bool wantLyrics) {
 	const bool wantCover = !light;
 	t = TrackTags();
+	t.wantLyrics = wantLyrics;
 	Reader r;
 	if (!r.open(path)) return false;
 	t.fileSize = r.size;
