@@ -126,6 +126,11 @@ void parseText(const std::string& text, Lyrics& L) {
 	std::vector<Line> timed;
 	std::vector<std::string> allTexts;
 	double offsetMs = 0.0;
+	// false: a line without a marker is shown in the normal colours.
+	// true: it keeps the previous singer until the next marker (the behaviour described on the LRC Wikipedia page).
+	const bool kSingerSticks = true;
+	char curSinger = 0;
+	bool sawSinger = false;
 
 	size_t start = 0;
 	while (start <= text.size()) {
@@ -149,6 +154,10 @@ void parseText(const std::string& text, Lyrics& L) {
 					std::string key = line.substr(pos + 1, colon - pos - 1);
 					for (char& c : key) c = (char)tolower((unsigned char)c);
 					if (key == "offset") offsetMs = atof(line.substr(colon + 1, close - colon - 1).c_str());
+					const std::string value = trim(line.substr(colon + 1, close - colon - 1));
+					if (key == "ti" && L.title.empty()) L.title = value;
+					if (key == "ar" && L.artist.empty()) L.artist = value;
+					if (key == "al" && L.album.empty()) L.album = value;
 					bool alpha = !key.empty();
 					for (char c : key) if (!isalpha((unsigned char)c)) alpha = false;
 					if (alpha && key.size() <= 8) continue;
@@ -157,9 +166,17 @@ void parseText(const std::string& text, Lyrics& L) {
 			allTexts.push_back(cleanText(line));
 			continue;
 		}
-		const std::string body = cleanText(line.substr(pos));
+		std::string body = cleanText(line.substr(pos));
+		// "M:" / "F:" / "D:" at the start of a line = who sings it; the following lines keep that singer
+		char lineSinger = kSingerSticks ? curSinger : 0;
+		if (body.size() >= 2 && (body[0] == 'M' || body[0] == 'F' || body[0] == 'D') && body[1] == ':') {
+			lineSinger = body[0];
+			if (kSingerSticks) curSinger = body[0];
+			sawSinger = true;
+			body = trim(body.substr(2));
+		}
 		allTexts.push_back(body);
-		for (double st : stamps) { Line l; l.time = st; l.text = body; timed.push_back(l); }
+		for (double st : stamps) { Line l; l.time = st; l.text = body; l.singer = lineSinger; timed.push_back(l); }
 	}
 
 	if (timed.size() >= 2) {
@@ -167,7 +184,7 @@ void parseText(const std::string& text, Lyrics& L) {
 		for (Line& l : timed) l.time = std::max(0.0, l.time - offsetMs / 1000.0); // positive offset = lyrics appear sooner
 		bool any = false;
 		for (const Line& l : timed) if (!l.text.empty()) { any = true; break; }
-		if (any) { L.found = true; L.timed = true; L.lines = timed; return; }
+		if (any) { L.found = true; L.timed = true; L.hasSingers = sawSinger; L.lines = timed; return; }
 		return;
 	}
 

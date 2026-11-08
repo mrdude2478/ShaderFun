@@ -2,7 +2,7 @@
 precision mediump float;
 //!model on
 //!scroller off
-//!model "cube_atlas.obj"
+//!model "cube_atlas.obj" "batman.jpg"
 //!material neon
 //!model_ground off
 //!model_audio off

@@ -99,6 +99,8 @@ const std::string& currentPath();
 std::string title();         // tag title or file name
 std::string subtitle();      // artist (- album) or the folder name
 std::string nowPlayingText();// "Artist - Title" for the scroller
+bool isLoading();            // a network song is being downloaded before it can play
+float loadProgress();        // 0..1 while isLoading(), -1 if unknown
 uint32_t trackChangeCounter(); // increases whenever a different track starts
 
 } // namespace player

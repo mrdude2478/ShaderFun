@@ -282,6 +282,48 @@ static bool g_directiveSetsModel = false; // true if //!model was in the shader
 static bool g_audioReactive = true;    // //!model_audio off
 static bool g_groundEnabled = true;    // //!model_ground off – hide shadow disc
 
+// ----------------------------------------------------------------- texture override (//!model "skin.jpg")
+static std::string g_texOverride; // from the current shader's directive; "" = use the picture named like the model, "none" = no texture
+
+static std::string lowerStr(std::string s) {
+	for (char& c : s) c = (char)tolower((unsigned char)c);
+	return s;
+}
+
+static bool isImageName(const std::string& name) {
+	const std::string l = lowerStr(name);
+	const char* exts[] = { ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".gif" };
+	for (const char* e : exts) {
+		const size_t n = strlen(e);
+		if (l.size() > n && l.compare(l.size() - n, n, e) == 0) return true;
+	}
+	return false;
+}
+
+static bool pathExists(const std::string& p) {
+	struct stat st;
+	return stat(p.c_str(), &st) == 0;
+}
+
+// Finds the override picture: next to the .obj first, then the models folder, then the images folder.
+// A name with a drive or a leading slash ("sdmc:/...") is used as it is.
+static std::string resolveTextureOverride(const std::string& name, const std::string& objPath) {
+	if (name.empty()) return "";
+	if (name.find(':') != std::string::npos || name[0] == '/') return pathExists(name) ? name : "";
+	std::vector<std::string> dirs;
+	const size_t slash = objPath.find_last_of("/\\");
+	if (slash != std::string::npos) dirs.push_back(objPath.substr(0, slash));
+	dirs.push_back("sdmc:/switch/shaderfun/models");
+	dirs.push_back("sdmc:/switch/shaderfun/images");
+	dirs.push_back("romfs:/models");
+	dirs.push_back("romfs:/images");
+	for (const std::string& d : dirs) {
+		const std::string candidate = d + "/" + name;
+		if (pathExists(candidate)) return candidate;
+	}
+	return "";
+}
+
 // ----------------------------------------------------------------- texture load
 static bool loadTextureFile(const std::string& path, GLuint& outId) {
 	SDL_Surface* surf = IMG_Load(path.c_str());
@@ -327,6 +369,16 @@ static bool loadTextureFile(const std::string& path, GLuint& outId) {
 static void tryLoadTextureForModel(Mesh& m) {
 	if (m.texId) { glDeleteTextures(1, &m.texId); m.texId = 0; }
 	m.hasTex = false;
+	m.texKey = g_texOverride;
+
+	// a picture chosen by the shader (//!model "skin.jpg" or //!model_texture "skin.jpg")
+	if (!g_texOverride.empty()) {
+		const std::string low = lowerStr(g_texOverride);
+		if (low == "none" || low == "off") return; // plain colour on purpose
+		const std::string found = resolveTextureOverride(g_texOverride, m.path);
+		if (!found.empty() && loadTextureFile(found, m.texId)) { m.hasTex = true; return; }
+		printf("model3d: texture '%s' not found or unreadable, using the model's own picture\n", g_texOverride.c_str());
+	}
 
 	std::string base = m.path;
 	size_t dot = base.find_last_of('.');
@@ -578,6 +630,7 @@ static void freeMesh(Mesh& m) {
 	if (m.vbo) { glDeleteBuffers(1, &m.vbo); m.vbo = 0; }
 	if (m.texId) { glDeleteTextures(1, &m.texId); m.texId = 0; }
 	m.vertexCount = 0; m.hasTex = false;
+	m.texKey.clear();
 	m.path.clear(); m.name.clear();
 }
 
@@ -616,6 +669,10 @@ static time_t textureMtimeFor(const std::string& objPath) {
 	for (const char* e : exts) {
 		time_t t = fileMtime(base + e);
 		if (t > best) best = t;
+	}
+	if (!g_texOverride.empty()) {
+		const std::string ov = resolveTextureOverride(g_texOverride, objPath);
+		if (!ov.empty()) { time_t t = fileMtime(ov); if (t > best) best = t; }
 	}
 	// also images/ folder by basename
 	size_t slash = objPath.find_last_of("/\\");
@@ -858,6 +915,29 @@ static float extractFloat(const std::string& line, size_t from, float fallback) 
 	return (float)atof(line.c_str() + i);
 }
 
+// every "quoted" string on the line after 'from'
+static std::vector<std::string> quotedStrings(const std::string& line, size_t from) {
+	std::vector<std::string> out;
+	size_t i = from;
+	while (true) {
+		const size_t q1 = line.find('"', i);
+		if (q1 == std::string::npos) break;
+		const size_t q2 = line.find('"', q1 + 1);
+		if (q2 == std::string::npos) break;
+		if (q2 > q1 + 1) out.push_back(line.substr(q1 + 1, q2 - q1 - 1));
+		i = q2 + 1;
+	}
+	return out;
+}
+
+// After the directives are read: if the model on screen wears a different skin than this shader asks for, change it
+static void syncTextureOverride() {
+	if (g_mesh.vertexCount > 0 && g_mesh.texKey != g_texOverride) {
+		tryLoadTextureForModel(g_mesh);
+		g_texMtime = textureMtimeFor(g_mesh.path);
+	}
+}
+
 void applyShaderDirectives(const std::string& fragSource) {
 	// Reset each time a shader loads – model is OFF unless the frag opts in
 	g_enabled = false;
@@ -868,10 +948,11 @@ void applyShaderDirectives(const std::string& fragSource) {
 	g_directiveSetsModel = false;
 	g_audioReactive = true;
 	g_groundEnabled = true;
+	g_texOverride.clear(); // each shader chooses its own skin (or none)
 	// leave camera yaw/pitch/dist and material as-is unless overridden
 	// (so manual free-look isn't wiped every shader change unless directed)
 
-	if (fragSource.empty()) return;
+	if (fragSource.empty()) { syncTextureOverride(); return; }
 
 	std::istringstream in(fragSource);
 	std::string line;
@@ -889,6 +970,13 @@ void applyShaderDirectives(const std::string& fragSource) {
 			std::string restLower = rest;
 			for (char& c : restLower) c = (char)tolower(c);
 
+			if (restLower.compare(0, 8, "_texture") == 0 || restLower.compare(0, 5, "_skin") == 0) {
+				// //!model_texture "skin.jpg"   (or: //!model_texture none)
+				std::string q = extractQuoted(line, p);
+				if (q.empty() && (restLower.find("none") != std::string::npos || restLower.find("off") != std::string::npos)) q = "none";
+				if (!q.empty()) g_texOverride = q;
+				continue;
+			}
 			if (restLower.compare(0, 9, "_rotate_x") == 0) {
 				g_rotateSpeedX = extractFloat(line, p + 8, g_rotateSpeedX);
 				continue;
@@ -939,19 +1027,25 @@ void applyShaderDirectives(const std::string& fragSource) {
 				continue;
 			}
 
-			// plain //!model ...
-			if (restLower.find("off") != std::string::npos) {
+			// plain //!model ...   (a quoted name ending in .obj picks the model, one ending in .jpg/.png/.bmp picks its skin)
+			const bool hasQuote = rest.find('"') != std::string::npos;
+			if (!hasQuote && restLower.find("off") != std::string::npos) {
 				g_enabled = false;
 				g_directiveSetsModel = true;
-			} else if (restLower.find("on") != std::string::npos && rest.find('"') == std::string::npos) {
+			} else if (!hasQuote && restLower.find("on") != std::string::npos) {
 				g_enabled = true;
 				g_directiveSetsModel = true;
 			} else {
-				std::string q = extractQuoted(line, p);
-				if (!q.empty()) {
-					g_enabled = true;
-					g_directiveSetsModel = true;
-					selectByName(q);
+				for (const std::string& q : quotedStrings(line, p)) {
+					if (isImageName(q)) {
+						g_texOverride = q;
+						g_enabled = true;
+					}
+					else {
+						g_enabled = true;
+						g_directiveSetsModel = true;
+						selectByName(q);
+					}
 				}
 			}
 			continue;
@@ -973,6 +1067,7 @@ void applyShaderDirectives(const std::string& fragSource) {
 			continue;
 		}
 	}
+	syncTextureOverride();
 }
 
 void applyAutoMatch(const std::string& shaderPath) {

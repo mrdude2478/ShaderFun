@@ -1,4 +1,5 @@
 #include "player.h"
+#include "smbnet.h"
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_mixer.h>
@@ -32,6 +33,13 @@ State g_state = STOPPED;
 std::vector<std::string> g_queue;  // tracks in "natural" order
 std::vector<int> g_order;          // play order: indices into g_queue
 bool g_keepQueue = false;          // remember this queue for the next launch (it was made by the user, not the automatic start-up queue)
+bool g_loading = false;            // waiting for a network song to finish downloading
+bool g_loadStream = false;         // ...it is being streamed (playing starts after the first part arrives)
+bool g_streaming = false;          // the music object reads its data from a stream
+std::string g_streamPath;          // smb:// path of the stream
+bool g_pauseAfterLoad = false;     // ...and it should stay paused when it is ready (sleep timer)
+std::string g_loadingPath;         // the smb:// path being downloaded
+std::string g_curLocal;            // cached copy of the current network song ("" for local songs)
 bool g_queueDirty = false;         // the queue changed since last_queue.txt was written
 std::vector<char> g_chosen;        // parallel to g_queue: 1 = the user picked it, 0 = loaded automatically (start-up / idle folder queue)
 int g_pos = -1;                    // index into g_order
@@ -233,14 +241,16 @@ bool readQueueFile(std::vector<std::string>& tracks, std::vector<char>& chosen) 
 }
 
 void freeMusic() {
+	if (g_streaming) smbnet::abortStreams(); // do not wait for data that is not wanted any more
 	if (g_music) {
 		Mix_HaltMusic();
 		Mix_FreeMusic(g_music);
 		g_music = nullptr;
 	}
+	g_streaming = false;
 }
 
-void fillMetadata() {
+void fillMetadata(bool skipDuration = false) {
 	g_title.clear();
 	g_artist.clear();
 	g_album.clear();
@@ -253,37 +263,210 @@ void fillMetadata() {
 	if (t) g_title = t;
 	if (a) g_artist = a;
 	if (al) g_album = al;
-	double d = Mix_MusicDuration(g_music);
-	if (d > 0.0) g_duration = d;
+	if (!skipDuration) {
+		const double d = Mix_MusicDuration(g_music);
+		if (d > 0.0) g_duration = d;
+	}
 #endif
 }
 
-// Loads the current queue entry. autoplay=false is not needed: selecting never loads.
-bool loadCurrent() {
-	freeMusic();
-	const int qi = currentQueueIndex();
-	if (qi < 0) return false;
-	const std::string& path = g_queue[qi];
-
-	g_music = Mix_LoadMUS(path.c_str());
-	if (!g_music) {
-		printf("Failed to load %s: %s\n", path.c_str(), Mix_GetError());
-		return false;
+bool isStreamableName(const std::string& path) {
+	static const char* exts[] = { ".mp3", ".flac", ".ogg", ".oga", ".opus", ".wav" };
+	const std::string l = lower(path);
+	for (const char* e : exts) {
+		const size_t n = strlen(e);
+		if (l.size() > n && l.compare(l.size() - n, n, e) == 0) return true;
 	}
+	return false;
+}
+
+bool isMp3Name(const std::string& path) {
+	const std::string l = lower(path);
+	return l.size() > 4 && l.compare(l.size() - 4, 4, ".mp3") == 0;
+}
+
+// Length of an MP3 without reading all of it (SDL_mixer's own measurement would read the whole file):
+// from the Xing / VBRI header if there is one, otherwise from the bitrate of the first frame.
+double estimateMp3Duration(const std::vector<uint8_t>& b, uint64_t fileSize) {
+	size_t i = 0;
+	if (b.size() >= 10 && memcmp(b.data(), "ID3", 3) == 0)
+		i = 10 + (((size_t)(b[6] & 0x7f) << 21) | ((size_t)(b[7] & 0x7f) << 14) | ((size_t)(b[8] & 0x7f) << 7) | (size_t)(b[9] & 0x7f));
+	const size_t audioStart = i;
+	for (; i + 4 <= b.size() && i < audioStart + 8192; i++) {
+		if (b[i] != 0xFF || (b[i + 1] & 0xE0) != 0xE0) continue;
+		const int ver = (b[i + 1] >> 3) & 3;     // 3 = MPEG1, 2 = MPEG2, 0 = MPEG2.5
+		const int layer = (b[i + 1] >> 1) & 3;   // 1 = layer III, 2 = II, 3 = I
+		const int bi = (b[i + 2] >> 4) & 15, si = (b[i + 2] >> 2) & 3;
+		if (ver == 1 || layer == 0 || bi == 0 || bi == 15 || si == 3) continue;
+		static const int br1[3][15] = { { 0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448 },
+			{ 0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384 },
+			{ 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320 } };
+		static const int br2[3][15] = { { 0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256 },
+			{ 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 },
+			{ 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 } };
+		const bool mpeg1 = (ver == 3);
+		const int bitrate = (mpeg1 ? br1 : br2)[layer == 3 ? 0 : (layer == 2 ? 1 : 2)][bi];
+		static const int sr[3][3] = { { 11025, 12000, 8000 }, { 0, 0, 0 }, { 22050, 24000, 16000 } };
+		const int rate = mpeg1 ? (si == 0 ? 44100 : (si == 1 ? 48000 : 32000)) : sr[ver == 2 ? 2 : 0][si];
+		if (bitrate <= 0 || rate <= 0) continue;
+		const int spf = (layer == 3) ? 384 : ((layer == 2 || mpeg1) ? 1152 : 576);
+		const bool mono = ((b[i + 3] >> 6) & 3) == 3;
+		const size_t side = mpeg1 ? (mono ? 17 : 32) : (mono ? 9 : 17);
+		const size_t x = i + 4 + ((b[i + 1] & 1) ? 0 : 2) + side;   // where a Xing / Info header would start
+		if (x + 12 <= b.size() && (memcmp(&b[x], "Xing", 4) == 0 || memcmp(&b[x], "Info", 4) == 0) && (b[x + 7] & 1)) {
+			const uint32_t frames = ((uint32_t)b[x + 8] << 24) | ((uint32_t)b[x + 9] << 16) | ((uint32_t)b[x + 10] << 8) | b[x + 11];
+			if (frames > 0) return (double)frames * spf / rate;
+		}
+		const size_t v = i + 4 + 32;                                // VBRI header
+		if (v + 18 <= b.size() && memcmp(&b[v], "VBRI", 4) == 0) {
+			const uint32_t frames = ((uint32_t)b[v + 14] << 24) | ((uint32_t)b[v + 15] << 16) | ((uint32_t)b[v + 16] << 8) | b[v + 17];
+			if (frames > 0) return (double)frames * spf / rate;
+		}
+		if (fileSize > i) return (double)(fileSize - i) * 8.0 / ((double)bitrate * 1000.0); // constant bitrate
+		return 0.0;
+	}
+	return 0.0;
+}
+
+// Starts playing a file that is on the SD card. 'shown' is the name used in the log (the smb:// path for network songs).
+// g_music is loaded: start it and fill in the song information. streaming = it reads from a stream that is still arriving.
+bool beginMusic(const std::string& shown, bool streaming) {
 	if (Mix_PlayMusic(g_music, 0) == -1) {
-		printf("Failed to play %s: %s\n", path.c_str(), Mix_GetError());
+		printf("Failed to play %s: %s\n", shown.c_str(), Mix_GetError());
 		Mix_FreeMusic(g_music);
 		g_music = nullptr;
 		return false;
 	}
 	Mix_VolumeMusic(effVol());
-	fillMetadata();
+	g_streaming = streaming;
+	g_streamPath = streaming ? shown : std::string();
+	if (streaming && isMp3Name(shown)) {
+		// the exact length would mean reading the whole MP3, which has not arrived yet: use the header
+		fillMetadata(true);
+		g_duration = estimateMp3Duration(smbnet::streamHead(shown, 1024 * 1024), smbnet::streamTotal(shown));
+	}
+	else {
+		fillMetadata();
+	}
 	g_state = PLAYING;
 	g_basePos = 0.0;
 	g_baseTick = SDL_GetTicks();
 	g_changeCounter++;
-	printf("Now playing: %s\n", path.c_str());
+	printf("Now playing: %s%s\n", shown.c_str(), streaming ? " (streaming)" : "");
+
+	// network songs: the cache only holds the song playing and the next one (which starts downloading now,
+	// so the change is instant). Everything else is deleted.
+	std::string nextRemote;
+	const int n = (int)g_order.size();
+	int nextPos = -1;
+	if (n > 1) {
+		if (g_pos + 1 < n) nextPos = g_pos + 1;
+		else if (g_mode == MODE_REPEAT_ALL || g_mode == MODE_SHUFFLE) nextPos = 0; // wraps round
+	}
+	if (nextPos >= 0) {
+		const std::string& next = g_queue[g_order[nextPos]];
+		if (smbnet::isRemote(next) && next != shown) nextRemote = next;
+	}
+	smbnet::trace("playing %s (position %d of %d, mode %d); next to fetch: %s", shown.c_str(), g_pos + 1, n, (int)g_mode,
+		nextRemote.empty() ? "(nothing)" : nextRemote.c_str());
+	std::vector<std::string> keep;
+	if (smbnet::isRemote(shown)) keep.push_back(shown);
+	if (!nextRemote.empty()) keep.push_back(nextRemote);
+	smbnet::keepOnly(keep);
+	if (!nextRemote.empty()) smbnet::prefetch(nextRemote);
 	return true;
+}
+
+bool startFile(const std::string& path, const std::string& shown) {
+	g_music = Mix_LoadMUS(path.c_str());
+	if (!g_music) {
+		printf("Failed to load %s: %s\n", shown.c_str(), Mix_GetError());
+		return false;
+	}
+	return beginMusic(shown, false);
+}
+
+// Loads the current queue entry. autoplay=false is not needed: selecting never loads.
+// A network song that is not on the SD card yet is requested; update() starts it when it has arrived.
+bool loadCurrent() {
+	freeMusic();
+	g_loading = false;
+	g_loadStream = false;
+	g_pauseAfterLoad = false;
+	g_curLocal.clear();
+	const int qi = currentQueueIndex();
+	if (qi < 0) return false;
+	const std::string path = g_queue[qi];
+
+	if (smbnet::isRemote(path)) {
+		std::string local;
+		if (smbnet::cachedFile(path, local)) {
+			g_curLocal = local;
+			return startFile(local, path);
+		}
+		g_loading = true;
+		g_loadingPath = path;
+		// start playing after the first part arrives when the format allows it (and it is not already being downloaded)
+		if (isStreamableName(path) && !smbnet::isFetching(path)) {
+			smbnet::requestStream(path);
+			g_loadStream = true;
+		}
+		else {
+			smbnet::requestFetch(path);
+		}
+		fillMetadata(); // empty: the title falls back to the file name
+		g_state = PAUSED;
+		g_basePos = 0.0;
+		g_changeCounter++;
+		return true;
+	}
+	return startFile(path, path);
+}
+
+// called every frame while a network song is downloading
+void pollRemoteLoad() {
+	std::string local, err;
+	if (g_loadStream) {
+		const smbnet::StreamState ss = smbnet::streamState(g_loadingPath, local, err);
+		if (ss == smbnet::STREAM_PREPARING) return;
+		if (ss == smbnet::STREAM_UNSUPPORTED) { // too big to stream: download it completely
+			g_loadStream = false;
+			smbnet::requestFetch(g_loadingPath);
+			return;
+		}
+		g_loading = false;
+		g_loadStream = false;
+		if (ss == smbnet::STREAM_READY) {
+			SDL_RWops* rw = smbnet::openStreamRW(g_loadingPath);
+			if (rw) {
+				g_music = Mix_LoadMUS_RW(rw, 1);
+				if (g_music) {
+					g_curLocal = local; // the first part is on the SD card already: tags, cover art and lyrics read it
+					if (beginMusic(g_loadingPath, true)) {
+						if (g_pauseAfterLoad) { g_pauseAfterLoad = false; pause(); }
+						return;
+					}
+				}
+				else printf("Failed to stream %s: %s\n", g_loadingPath.c_str(), Mix_GetError());
+			}
+		}
+		g_pauseAfterLoad = false;
+		g_curLocal.clear();
+		g_state = STOPPED; // could not start it (the reason is shown as a message)
+		return;
+	}
+	const smbnet::FetchState st = smbnet::fetchState(g_loadingPath, local, err);
+	if (st == smbnet::FETCH_BUSY) return;
+	g_loading = false;
+	if (st == smbnet::FETCH_DONE) {
+		g_curLocal = local;
+		if (startFile(local, g_loadingPath)) {
+			if (g_pauseAfterLoad) { g_pauseAfterLoad = false; pause(); }
+			return;
+		}
+	}
+	g_pauseAfterLoad = false;
+	g_state = STOPPED; // could not get the song: stop (the reason is shown as a message)
 }
 
 // Try the current entry; on failure skip forward (bounded) so one bad file doesn't stop playback.
@@ -324,7 +507,7 @@ void onTrackEnded() {
 		if (moved) {
 			const float f = g_fade;
 			g_fade = 0.0f; // silent, so no blip of the next track
-			if (loadCurrentOrSkip()) pause();
+			if (loadCurrentOrSkip()) { if (g_loading) g_pauseAfterLoad = true; else pause(); }
 			g_fade = f;
 			Mix_VolumeMusic(effVol());
 		}
@@ -419,6 +602,10 @@ void init(const char* configPath) {
 	g_rng.seed((unsigned)SDL_GetTicks() ^ 0x5eed1234u);
 	g_configPath = configPath ? configPath : "";
 	loadConfig();
+	// songs downloaded in a previous run: kept only if the user chose that (otherwise they were only temporary)
+	smbnet::setKeepCache(configInt("keep_cache", 0) != 0);
+	if (smbnet::keepCache()) smbnet::cleanIncomplete();
+	else smbnet::clearCache();
 	Mix_VolumeMusic(g_volume);
 
 	// Queue: the one you chose last time if there was one, otherwise the music folder
@@ -448,7 +635,12 @@ void init(const char* configPath) {
 
 	// Get the last track ready at its old position (paused, unless "Resume on launch" is set to playing)
 	struct stat lst;
-	if (startIdx >= 0 && stat(lastPath.c_str(), &lst) == 0) {
+	bool lastIsReady = false;
+	if (startIdx >= 0) {
+		if (smbnet::isRemote(lastPath)) { std::string cachedCopy; lastIsReady = smbnet::cachedFile(lastPath, cachedCopy); } // a network song kept in the cache
+		else lastIsReady = stat(lastPath.c_str(), &lst) == 0;
+	}
+	if (lastIsReady) {
 		const int savedVol = g_volume;
 		g_volume = 0; // silent while it loads and seeks, so there is no blip of sound
 		Mix_VolumeMusic(0);
@@ -473,7 +665,8 @@ void shutdown() {
 }
 
 void update() {
-	if (g_state == PLAYING && !Mix_PlayingMusic()) onTrackEnded();
+	if (g_loading) pollRemoteLoad();
+	else if (g_state == PLAYING && !Mix_PlayingMusic()) onTrackEnded();
 
 	// sleep timer: fade out over the last SLEEP_FADE_MS, then pause
 	if (g_sleepOn && !g_sleepAtTrackEnd) {
@@ -644,7 +837,7 @@ int enqueue(const std::vector<std::string>& tracks, bool playNext) {
 
 // ================================================================== transport
 void play() {
-	if (g_order.empty()) return;
+	if (g_order.empty() || g_loading) return;
 	if (g_state == PAUSED) {
 		Mix_ResumeMusic();
 		g_baseTick = SDL_GetTicks();
@@ -668,6 +861,8 @@ void togglePause() {
 }
 
 void stop() {
+	g_loading = false;
+	g_curLocal.clear();
 	freeMusic();
 	g_state = STOPPED;
 	fillMetadata();
@@ -691,6 +886,7 @@ void prev() {
 
 bool canSeek() {
 	const int qi = currentQueueIndex();
+	if (g_streaming && !smbnet::streamComplete(g_streamPath)) return false; // part of the song has not arrived yet
 	return g_music && g_state != STOPPED && qi >= 0 && !isTrackerFormat(g_queue[qi]);
 }
 
@@ -759,9 +955,12 @@ int queueIndex() { return g_pos; }
 int queueSize() { return (int)g_queue.size(); }
 
 const std::string& currentPath() {
+	if (!g_curLocal.empty()) return g_curLocal;
 	const int qi = currentQueueIndex();
 	return qi >= 0 ? g_queue[qi] : g_emptyString;
 }
+bool isLoading() { return g_loading; }
+float loadProgress() { return g_loading ? (g_loadStream ? smbnet::streamProgress(g_loadingPath) : smbnet::fetchProgress(g_loadingPath)) : -1.0f; }
 
 std::string title() {
 	if (!g_title.empty()) return g_title;

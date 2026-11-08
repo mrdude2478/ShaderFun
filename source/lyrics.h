@@ -10,12 +10,17 @@ namespace lyrics {
 struct Line {
 	double time = 0.0;   // seconds (timed lyrics only)
 	std::string text;    // UTF-8, may be empty (instrumental gap)
+	char singer = 0;     // 'M' male, 'F' female, 'D' duet ("M:" "F:" "D:" prefix on that line); 0 = no marker, shown in the normal colours
 };
 
 struct Lyrics {
 	bool found = false;
 	bool timed = false;                 // true: 'lines' has timestamps and follows the music
 	std::string source;                 // "lrc file" or "embedded tag"
+	std::string title;                  // from the [ti:...] tag (may be empty)
+	std::string artist;                 // from the [ar:...] tag (may be empty)
+	std::string album;                  // from the [al:...] tag (may be empty)
+	bool hasSingers = false;            // the file uses M: / F: / D: markers, so lines can be coloured by singer
 	std::vector<Line> lines;            // timed lyrics, sorted by time
 	std::vector<std::string> plain;     // untimed lyrics, one entry per line
 };

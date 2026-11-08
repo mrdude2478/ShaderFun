@@ -44,6 +44,7 @@ Hold ZR + Right Stick X: Cycle material (Metallic/Chrome/Neon/Matte)
 #include "ftp.h"
 #include "scroller.h"
 #include "player.h"
+#include "smbnet.h"
 #include "ui.h"
 #include "library.h"
 #include "model3d.h"
@@ -294,6 +295,9 @@ static void cleanupImageTextures() {
 //   //!audio off       silences waveform/spectrum for this shader (iChannel0/1)
 // 3D model directives (off by default):
 //   //!model "cube_atlas.obj" | //!model on | //!model off
+//   //!model "skin.jpg"   (or //!model_texture "skin.jpg" / none): the picture wrapped round the model,
+//                         instead of the one named like the .obj. Searched next to the .obj, then in
+//                         models/ and images/. Both can share a line: //!model "cube.obj" "skin.jpg"
 //   //!material matte | neon | chrome | metallic
 //   //!model_rotate 0.6  //!model_rotate_x 0.4  //!model_rotate_z 0.2
 //   //!model_zoom 5.5  //!model_pos 0 0.2 0
@@ -1526,12 +1530,17 @@ int main(int argc, char* argv[]) {
 	}
 	// Reset when done
 	appletSetMediaPlaybackState(false); //allow switch to go back to sleep
-	ftp_cleanup(&pad);  // Pass the pad parameter
 	saveVisualState(shaderFiles, currentShader);
 	ui::shutdown();
 	if (plReady) plExit();
 	library::shutdown();
-	player::shutdown(); // also saves the last track, position and queue
+	smbnet::trace("exit: stopping the music");
+	smbnet::abortStreams(); // never wait for network data while the music is being closed
+	player::shutdown();    // also saves the last track, position and queue
+	smbnet::trace("exit: stopping the network");
+	smbnet::shutdown();    // must happen BEFORE ftp_cleanup(): that closes the socket service the SMB connection needs
+	ftp_cleanup(&pad);     // Pass the pad parameter (also calls socketExit)
+	smbnet::trace("exit: sockets closed");
 	cleanupAudio();
 	glDeleteTextures(1, &audioTexWaveform);
 	glDeleteTextures(1, &audioTexSpectrum);

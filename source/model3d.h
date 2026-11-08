@@ -24,6 +24,7 @@ struct Mesh {
 	std::string name;
 	GLuint texId = 0;
 	bool hasTex = false;
+	std::string texKey;   // the //!model_texture override this texture was loaded for ("" = the picture named like the model)
 };
 
 bool init();

@@ -3,6 +3,7 @@
 #include "tags.h"
 #include "library.h"
 #include "lyrics.h"
+#include "smbnet.h"
 #include <switch.h> // software keyboard (swkbd)
 
 #include <SDL2/SDL.h>
@@ -46,8 +47,8 @@ const float BAR_X0 = 140.0f, BAR_X1 = 1140.0f, BAR_Y = 618.0f;
 const float ROW_BTN_Y = 676.0f;
 const float LIB_W = 700.0f, LIB_HEAD = 100.0f, LIB_FOOT = 56.0f, ROW_H = 54.0f;
 
-enum { SZ_SMALL, SZ_NORMAL, SZ_TITLE, SZ_COUNT };
-const int FONT_PT[SZ_COUNT] = { 20, 26, 40 };
+enum { SZ_SMALL, SZ_NORMAL, SZ_TITLE, SZ_LYRIC, SZ_COUNT };
+const int FONT_PT[SZ_COUNT] = { 20, 26, 40, 34 }; // SZ_LYRIC: the line being sung in the lyrics box (a little smaller than SZ_TITLE so more text fits)
 
 int g_w = 1280, g_h = 720;
 bool g_ready = false;
@@ -60,7 +61,7 @@ struct FontSource {
 };
 std::vector<FontSource> g_sources;
 std::vector<TTF_Font*> g_faces[SZ_COUNT]; // same source order in every size
-int g_fontH[SZ_COUNT] = { 24, 31, 47 };
+int g_fontH[SZ_COUNT] = { 24, 31, 47, 40 };
 
 // ============================================================================ glyph / icon atlas
 const int ATLAS = 2048;
@@ -675,10 +676,10 @@ Repeater g_repUp, g_repDown, g_repVol, g_repPgUp, g_repPgDown;
 // ============================================================================ library
 enum RowKind {
 	R_UP, R_PLAYDIR, R_SETDIR, R_DIR, R_FILE,                                   // folder browser
-	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, // library views
-	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT
+	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, // library views
+	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT
 };
-enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST };
+enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_NETSETTINGS };
 
 struct Row {
 	RowKind kind;
@@ -705,6 +706,7 @@ struct View {
 	int plCount = 0;
 	std::string playlistPath;                        // playlist page: the .m3u file (for deleting it)
 	bool confirmDelete = false;                      // playlist page: 'delete' was pressed once
+	std::string netPath;                             // network page: folder inside the share ("" = top)
 };
 
 enum LibMode { M_MENU, M_FOLDERS, M_PICK }; // M_PICK: the 'add to playlist' page, shown over either of the others
@@ -902,6 +904,7 @@ View makeHome(int plCount) {
 	v.rows.push_back({ R_HOME_ARTISTS, "Artists", "", std::to_string(s.artists.size()) });
 	v.rows.push_back({ R_HOME_GENRES, "Genres", "", std::to_string(s.genres.size()) });
 	v.rows.push_back({ R_HOME_PLAYLISTS, "Playlists", "", std::to_string(plCount) });
+	v.rows.push_back({ R_HOME_NETWORK, "Network", "", smbnet::label() });
 	v.rows.push_back({ R_HOME_ALL, "All songs", "", std::to_string(s.tracks.size()) });
 	v.rows.push_back({ R_HOME_AUTO, "Auto-change visualisation", "", autoLabel() });
 	v.rows.push_back({ R_HOME_SLEEP, "Sleep timer", "", sleepLabel() });
@@ -1185,6 +1188,33 @@ NameResult askPlaylistName(const char* header, const std::string& initial, std::
 	return out.empty() ? NAME_CANCELLED : NAME_OK;
 }
 
+// A keyboard for any text (server address, user name, password...). NAME_OK with an empty text means "cleared".
+NameResult askText(const char* header, const char* guide, const std::string& initial, int maxLen, bool password, std::string& out) {
+	SwkbdConfig kbd;
+	if (R_FAILED(swkbdCreate(&kbd, 0))) return NAME_UNAVAILABLE;
+	if (password) swkbdConfigMakePresetPassword(&kbd);
+	else swkbdConfigMakePresetDefault(&kbd);
+	swkbdConfigSetHeaderText(&kbd, header);
+	swkbdConfigSetGuideText(&kbd, guide);
+	swkbdConfigSetOkButtonText(&kbd, "Save");
+	if (!initial.empty()) swkbdConfigSetInitialText(&kbd, initial.c_str());
+	swkbdConfigSetStringLenMax(&kbd, maxLen);
+
+	char buf[256] = { 0 };
+	const u64 t0 = armGetSystemTick();
+	const ::Result rc = swkbdShow(&kbd, buf, sizeof(buf));
+	const double secs = (double)(armGetSystemTick() - t0) / (double)armGetSystemTickFreq();
+	swkbdClose(&kbd);
+	if (R_FAILED(rc)) return secs < 0.3 ? NAME_UNAVAILABLE : NAME_CANCELLED;
+
+	std::string t = buf;
+	size_t a = 0, b = t.size();
+	while (a < b && (t[a] == ' ' || t[a] == '\t')) a++;
+	while (b > a && (t[b - 1] == ' ' || t[b - 1] == '\t')) b--;
+	out = t.substr(a, b - a); // a single space therefore clears a field
+	return NAME_OK;
+}
+
 // "<dir>/<name>.m3u", with " 2", " 3"... added if that file already exists
 std::string uniquePlaylistPath(const std::string& name, std::string& finalName) {
 	const std::string dir = library::playlistsDir();
@@ -1206,8 +1236,10 @@ std::string suggestPlaylistName() {
 }
 
 void saveQueueAsPlaylist() {
-	const std::vector<std::string> q = player::chosenQueuePaths(); // not the tracks the player loaded by itself
-	if (q.empty()) { showToast("You haven't queued anything yet"); return; }
+	std::vector<std::string> q;
+	for (const std::string& p : player::chosenQueuePaths()) // not the tracks the player loaded by itself
+		if (!smbnet::isRemote(p)) q.push_back(p);       // network songs cannot be saved in playlists yet
+	if (q.empty()) { showToast("You haven't queued anything yet (network songs can't be saved in playlists)"); return; }
 	mkdir("sdmc:/switch/shaderfun", 0777);
 	mkdir(library::playlistsDir().c_str(), 0777);
 	char stamp[48];
@@ -1243,6 +1275,168 @@ void libDeletePlaylist(const std::string& path, const std::string& name) {
 	}
 	libUpdatePlaylistCount();
 	showToast("Deleted playlist: " + name);
+}
+
+// ---- network browser (an SMB share): the folder is listed in the background and the page fills in when it arrives
+std::string netJoin(const std::string& dir, const std::string& name) { return dir.empty() ? name : dir + "/" + name; }
+
+// ---- network settings: server, share and login are typed with the Switch keyboard (they are saved in smb.ini)
+View makeNetSettingsView() {
+	View v;
+	v.kind = PG_NETSETTINGS;
+	v.title = "Network settings";
+	v.subtitle = "A shared folder on your network (SMB2 / SMB3)";
+	const smbnet::Config c = smbnet::getConfig();
+	auto val = [](const std::string& t, const char* none) { return t.empty() ? std::string(none) : t; };
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_NETFIELD, "Server address", "", val(c.server, "(not set)"), 0 });
+	v.rows.push_back({ R_NETFIELD, "Share name", "", val(c.share, "(not set)"), 1 });
+	v.rows.push_back({ R_NETFIELD, "User name", "", val(c.user, "(guest)"), 2 });
+	v.rows.push_back({ R_NETFIELD, "Password", "", c.password.empty() ? std::string("(none)") : std::string(std::min<size_t>(c.password.size(), 10), '*'), 3 });
+	v.rows.push_back({ R_NETFIELD, "Domain", "", val(c.domain, "(none)"), 4 });
+	v.rows.push_back({ R_NETFIELD, "Start folder", "", val(c.folder, "(top of the share)"), 5 });
+	v.rows.push_back({ R_NETKEEP, "Keep downloaded songs on exit", "", smbnet::keepCache() ? "yes" : "no" });
+	v.rows.push_back({ R_NETCONNECT, "Connect", "", "" });
+	v.sel = (c.server.empty() || c.share.empty()) ? 1 : (int)v.rows.size() - 1;
+	return v;
+}
+
+void libEditNetField(int field) {
+	smbnet::Config c = smbnet::getConfig();
+	std::string* target = nullptr;
+	const char* header = "";
+	const char* guide = "";
+	int maxLen = 64;
+	bool pw = false;
+	switch (field) {
+	case 0: target = &c.server; header = "Server address"; guide = "For example 192.168.0.1 (the router, NAS or PC)"; break;
+	case 1: target = &c.share; header = "Share name"; guide = "The name of the shared folder or drive"; break;
+	case 2: target = &c.user; header = "User name"; guide = "Leave empty to connect as a guest (a single space clears it)"; break;
+	case 3: target = &c.password; header = "Password"; guide = "Leave empty if there is none (a single space clears it)"; pw = true; break;
+	case 4: target = &c.domain; header = "Domain (optional)"; guide = "Only needed for some Windows domains"; break;
+	case 5: target = &c.folder; header = "Start folder (optional)"; guide = "A folder inside the share, for example Music"; maxLen = 120; break;
+	default: return;
+	}
+	std::string out;
+	const NameResult nr = askText(header, guide, pw ? std::string() : *target, maxLen, pw, out);
+	if (nr == NAME_UNAVAILABLE) { showToast("The keyboard could not be opened"); return; }
+	if (nr == NAME_CANCELLED) return;
+	if (field == 0) { // "smb://server/share" or "\\server\share" typed in one go: split it
+		std::string t = out;
+		const char* prefixes[] = { "smb://", "SMB://", "\\\\", "//" };
+		for (const char* pre : prefixes) if (t.compare(0, strlen(pre), pre) == 0) { t.erase(0, strlen(pre)); break; }
+		const size_t sep = t.find_first_of("/\\");
+		if (sep != std::string::npos) {
+			const std::string rest = t.substr(sep + 1);
+			t = t.substr(0, sep);
+			const size_t sep2 = rest.find_first_of("/\\");
+			if (!rest.empty() && c.share.empty()) c.share = rest.substr(0, sep2);
+		}
+		out = t;
+	}
+	*target = out;
+	smbnet::saveConfig(c);
+
+	View& cv = cur();
+	if (cv.kind == PG_NETSETTINGS) { // redraw the page with the new value, keeping the selection
+		const int sel = cv.sel;
+		const float sc = cv.scroll;
+		cv = makeNetSettingsView();
+		cv.sel = sel;
+		cv.scroll = sc;
+		clampScroll(cv);
+		cv.scrollDisp = cv.scroll;
+	}
+	showToast(pw ? "Password saved" : "Saved");
+}
+
+View makeNetworkView(const std::string& dir) {
+	View v;
+	v.kind = PG_NETWORK;
+	v.netPath = dir;
+	const size_t slash = dir.find_last_of('/');
+	v.title = dir.empty() ? "Network" : (slash == std::string::npos ? dir : dir.substr(slash + 1));
+	v.subtitle = smbnet::label() + (dir.empty() ? std::string() : "/" + dir);
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	if (dir == smbnet::startFolder()) v.rows.push_back({ R_NETSETTINGS, "Network settings", "", "" }); // only on the top page
+	v.empty = true;
+	v.emptyMsg = "Loading...";
+	return v;
+}
+
+void libOpenNetwork() {
+	smbnet::loadSettings(); // reads smb.ini (a missing file is created)
+	if (!smbnet::configured()) { // nothing to connect to yet: set it up first
+		libPush(makeNetSettingsView());
+		showToast("Enter the server address and the share name, then choose Connect");
+		return;
+	}
+	const std::string dir = smbnet::startFolder();
+	libPush(makeNetworkView(dir));
+	smbnet::requestList(dir);
+}
+
+// "Connect" on the settings page: use the saved details and (re)load the share
+void libNetConnect() {
+	smbnet::reload(); // reads smb.ini again
+	if (!smbnet::configured()) { showToast("The server address and the share name are needed"); return; }
+	if (g_lib.stack.size() > 1) g_lib.stack.pop_back(); // leave the settings page
+	const std::string dir = smbnet::startFolder();
+	if (!g_lib.stack.empty() && g_lib.stack.back().kind == PG_NETWORK) { // it was opened from the browser: reload that page
+		g_lib.stack.back() = makeNetworkView(dir);
+		smbnet::requestList(dir);
+	}
+	else {
+		libOpenNetwork();
+	}
+}
+
+std::string sizeText(uint64_t bytes) {
+	char buf[32];
+	if (bytes >= 1024ull * 1024ull) snprintf(buf, sizeof(buf), "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+	else snprintf(buf, sizeof(buf), "%u KB", (unsigned)(bytes / 1024ull));
+	return buf;
+}
+
+// a folder listing arrived: fill the page that asked for it
+void netApplyList(const std::string& dir, bool ok, std::vector<smbnet::Entry>& entries, const std::string& err) {
+	View* v = nullptr;
+	for (size_t i = g_lib.stack.size(); i-- > 0;)
+		if (g_lib.stack[i].kind == PG_NETWORK && g_lib.stack[i].netPath == dir) { v = &g_lib.stack[i]; break; }
+	if (!v) return; // the page is gone (the user went back)
+
+	const size_t fixedRows = (dir == smbnet::startFolder()) ? 2 : 1; // Back (+ Network settings on the top page)
+	v->rows.resize(std::min(v->rows.size(), fixedRows));
+	v->trackPaths.clear();
+	if (!ok) {
+		v->empty = true;
+		v->emptyMsg = err.empty() ? "Could not read this folder" : err;
+		return;
+	}
+	std::vector<smbnet::Entry> dirs, files;
+	for (const smbnet::Entry& e : entries) {
+		if (e.isDir) dirs.push_back(e);
+		else if (player::isMusicFile(e.name)) files.push_back(e);
+	}
+	auto byName = [](const smbnet::Entry& a, const smbnet::Entry& b) { return lowerStr(a.name) < lowerStr(b.name); };
+	std::sort(dirs.begin(), dirs.end(), byName);
+	std::sort(files.begin(), files.end(), byName);
+
+	if (!files.empty()) v->rows.push_back({ R_PLAYALL, "Play all songs in this folder", "", "" });
+	for (const smbnet::Entry& e : dirs) v->rows.push_back({ R_NETDIR, e.name, "", "" });
+	for (size_t i = 0; i < files.size(); i++) {
+		const std::string remote = "smb://" + netJoin(dir, files[i].name);
+		const size_t dot = files[i].name.find_last_of('.');
+		const std::string label = dot == std::string::npos ? files[i].name : files[i].name.substr(0, dot);
+		v->rows.push_back({ R_TRACK, label, remote, sizeText(files[i].size), (int)i });
+		v->trackPaths.push_back(remote);
+	}
+	v->empty = v->rows.size() <= fixedRows;
+	v->emptyMsg = "No folders or songs here";
+	v->sel = v->rows.size() > fixedRows ? (int)fixedRows : 0;
+	clampScroll(*v);
+	v->scroll = 0.0f;
+	v->scrollDisp = 0.0f;
 }
 
 // target empty = make a new playlist ("Playlist 1", "Playlist 2"...). paths is a copy on purpose: the picker page goes away here.
@@ -1344,6 +1538,33 @@ void libActivate(int idx) {
 	case R_HOME_ARTISTS: libPush(makeGroupList(PG_ARTISTS)); break;
 	case R_HOME_GENRES: libPush(makeGroupList(PG_GENRES)); break;
 	case R_HOME_PLAYLISTS: libUpdatePlaylistCount(); libPush(makePlaylistsView()); break;
+	case R_HOME_NETWORK: libOpenNetwork(); break;
+	case R_NETSETTINGS: libPush(makeNetSettingsView()); break;
+	case R_NETFIELD: libEditNetField(row.ref); break;
+	case R_NETCONNECT: libNetConnect(); break;
+	case R_NETKEEP: {
+		const bool keep = !smbnet::keepCache();
+		smbnet::setKeepCache(keep);
+		player::setConfigInt("keep_cache", keep ? 1 : 0);
+		showToast(keep ? "Downloaded songs stay on the SD card when you exit" : "Downloaded songs are deleted when you exit");
+		View& cv = cur();
+		if (cv.kind == PG_NETSETTINGS) { // redraw the page, keeping the selection
+			const int sel = cv.sel;
+			const float sc = cv.scroll;
+			cv = makeNetSettingsView();
+			cv.sel = sel;
+			cv.scroll = sc;
+			clampScroll(cv);
+			cv.scrollDisp = cv.scroll;
+		}
+		break;
+	}
+	case R_NETDIR: {
+		const std::string child = netJoin(v.netPath, row.label); // v.netPath is read before libPush moves things around
+		libPush(makeNetworkView(child));
+		smbnet::requestList(child);
+		break;
+	}
 	case R_HOME_ALL: libPush(makeAllSongs()); break;
 	case R_HOME_AUTO: cycleAuto(); if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; break;
 	case R_HOME_SLEEPACT:
@@ -1434,6 +1655,8 @@ void libAddToPlaylistPicker() {
 		return;
 	}
 	if (paths.empty()) { showToast("Nothing to add there"); return; }
+	for (const std::string& p : paths)
+		if (smbnet::isRemote(p)) { showToast("Songs from the network can't be added to playlists yet"); return; }
 	g_lib.pickReturn = g_lib.mode;
 	g_lib.pick = makePickPlaylistView(paths, name);
 	g_lib.mode = M_PICK;
@@ -1445,7 +1668,7 @@ void libAddToPlaylistPicker() {
 // ---- jump by letter (right stick left/right): previous / next first letter in the list
 char rowLetter(const Row& r) {
 	switch (r.kind) {
-	case R_DIR: case R_FILE: case R_TRACK: case R_ALBUM: case R_ARTIST: case R_GENRE: case R_PLAYLIST: case R_PICKPLAYLIST: break;
+	case R_DIR: case R_FILE: case R_TRACK: case R_ALBUM: case R_ARTIST: case R_GENRE: case R_PLAYLIST: case R_PICKPLAYLIST: case R_NETDIR: break;
 	default: return 0; // Back / Play all / home rows etc. do not belong to a letter
 	}
 	if (r.label.empty()) return '#';
@@ -1539,7 +1762,7 @@ void libJumpTo(int index) {
 
 bool rowOpensSomething(RowKind k) {
 	return k == R_DIR || k == R_ALBUM || k == R_ARTIST || k == R_GENRE || k == R_PLAYLIST ||
-		(k >= R_HOME_FOLDERS && k <= R_HOME_ALL);
+		k == R_NETDIR || k == R_NETSETTINGS || (k >= R_HOME_FOLDERS && k <= R_HOME_ALL);
 }
 
 // ============================================================================ track info panel
@@ -1673,6 +1896,23 @@ void lyricsRefresh() {
 	if (g_lyr.data.found && !g_lyr.data.timed) g_lyr.wanted = false; // a page does not open by itself on the next song
 }
 
+// "Title  -  Artist" from the [ti:] / [ar:] tags of the .lrc file ("" when it has neither)
+std::string lyricsHeader() {
+	const lyrics::Lyrics& L = g_lyr.data;
+	if (L.title.empty()) return L.artist;
+	if (L.artist.empty()) return L.title;
+	return L.title + "  -  " + L.artist;
+}
+
+// colours for lyrics that mark who sings: M: light blue, F: pink, D: violet
+Color lyricsSingerColor(char singer) {
+	switch (singer) {
+	case 'F': return { 1.00f, 0.50f, 0.66f, 1.0f };
+	case 'D': return { 0.80f, 0.58f, 1.00f, 1.0f };
+	default:  return { 0.46f, 0.78f, 1.00f, 1.0f };
+	}
+}
+
 void drawLyrics() {
 	if (g_lyr.alpha < 0.01f) return;
 	g_alpha = g_lyr.alpha;
@@ -1680,9 +1920,17 @@ void drawLyrics() {
 	const Color shadow = { 0.0f, 0.0f, 0.0f, 0.85f };
 
 	if (L.timed) {
-		const float cx = g_w * 0.5f, baseY = 318.0f, step = 56.0f, maxW = g_w - 200.0f;
+		const float boxX = 110.0f, boxW = g_w - 220.0f, pad = 30.0f; // pad: about one letter of space on each side of the text
+		const float cx = g_w * 0.5f, baseY = 318.0f, step = 56.0f, maxW = boxW - 2.0f * pad;
 		// soft backing so any shader stays readable: tall enough for two lines above and two below the current one
-		rrect(110, baseY - 160, g_w - 220.0f, 320, 26, { 0.0f, 0.0f, 0.0f, 0.58f }); //lyrics box
+		// (plus a header strip for the song and artist when the .lrc file has them)
+		const std::string header = lyricsHeader();
+		const float headerH = header.empty() ? 0.0f : 40.0f;
+		rrect(boxX, baseY - 160 - headerH, boxW, 320 + headerH, 26, { 0.0f, 0.0f, 0.0f, 0.58f }); //lyrics box
+		if (!header.empty()) {
+			drawText(SZ_SMALL, cx, baseY - 160 - headerH + 10.0f, header, withA(C_ACCENT, 0.95f), maxW, CENTER);
+			rrect(150, baseY - 160 + 2.0f, g_w - 300.0f, 1, 0, withA(C_WHITE, 0.12f));
+		}
 		const int curIdx = (int)floorf(g_lyr.linePos + 0.5f); // the line nearest the middle of the box
 		const int first = (int)floorf(g_lyr.linePos) - 2;
 		for (int i = first; i <= first + 6; i++) {
@@ -1690,12 +1938,18 @@ void drawLyrics() {
 			const float rel = (float)i - g_lyr.linePos;
 			const float dist = fabsf(rel);
 			const float a = fminf(1.0f, fmaxf(0.0f, 1.0f - dist * 0.36f));
-			const int sz = dist < 0.5f ? SZ_TITLE : SZ_NORMAL;
+			const int sz = dist < 0.5f ? SZ_LYRIC : SZ_NORMAL;
 			const float y = baseY + rel * step - g_fontH[sz] * 0.5f;
 			const bool isNext = (i == curIdx + 1);
-			const Color col = dist < 0.5f ? withA(LYR_CURRENT, a)
-				: isNext ? withA(LYR_NEXT, fmaxf(a, 0.85f)) // the upcoming line stays clearly readable
-				: withA(C_DIM, a);
+			Color col;
+			if (L.hasSingers && L.lines[i].singer) { // marked M: / F: / D: -> the singer's colour; the line being sung is the bright, large one
+				col = withA(lyricsSingerColor(L.lines[i].singer), dist < 0.5f ? a : (isNext ? fmaxf(a, 0.8f) : a) * 0.8f);
+			}
+			else {
+				col = dist < 0.5f ? withA(LYR_CURRENT, a)
+					: isNext ? withA(LYR_NEXT, fmaxf(a, 0.85f)) // the upcoming line stays clearly readable
+					: withA(C_DIM, a);
+			}
 			drawText(sz, cx + 2, y + 2, L.lines[i].text, withA(shadow, a), maxW, CENTER);
 			drawText(sz, cx, y, L.lines[i].text, col, maxW, CENTER);
 		}
@@ -1705,7 +1959,10 @@ void drawLyrics() {
 	// plain lyrics: a page
 	rrect(0, 0, (float)g_w, (float)g_h, 0, { 0.01f, 0.02f, 0.04f, 0.88f });
 	drawText(SZ_TITLE, 60, 14, "Lyrics", C_WHITE);
-	drawText(SZ_SMALL, 62, 66, player::title(), C_DIM, g_w - 400.0f);
+	{
+		const std::string hdr = lyricsHeader();
+		drawText(SZ_SMALL, 62, 66, hdr.empty() ? player::title() : hdr, C_DIM, g_w - 400.0f);
+	}
 	drawText(SZ_SMALL, g_w - 60.0f, 66, "Up / Down: scroll     B: close", C_DIM, 0, RIGHT);
 	rrect(60, 100, g_w - 120.0f, 1, 0, withA(C_WHITE, 0.12f));
 
@@ -2086,6 +2343,16 @@ Result update(const Input& in) {
 		if (d & BTN_Y) { closeInfo(); libOpenNow(); }
 	}
 
+	// ---- network
+	{
+		std::string dir, err, msg;
+		std::vector<smbnet::Entry> entries;
+		bool ok = false;
+		if (smbnet::pollList(dir, entries, err, ok)) netApplyList(dir, ok, entries, err);
+		if (smbnet::takeError(msg)) showToast(msg);
+		if (player::isLoading()) g_hudTimer = fmaxf(g_hudTimer, 1.5f); // keep the "Downloading" note on screen
+	}
+
 	// ---- lyrics
 	lyricsRefresh();
 	{
@@ -2177,6 +2444,15 @@ void drawHud() {
 			const std::string t = (g_autoSecs >= 120) ? std::to_string(g_autoSecs / 60) + "m" : std::to_string(g_autoSecs) + "s";
 			drawText(SZ_SMALL, 1108, 584 - g_fontH[SZ_SMALL] * 0.5f, t, C_ACCENT, 0, RIGHT);
 		}
+	}
+
+	// a network song is being downloaded before it can play
+	if (player::isLoading()) {
+		const float p = player::loadProgress();
+		const std::string label = p >= 0.0f ? "Downloading " + std::to_string((int)(p * 100.0f)) + "%" : std::string("Downloading...");
+		const float w = textWidth(SZ_SMALL, label) + 28.0f, h = 30.0f, left = 60.0f, cy = 584.0f;
+		rrect(left, cy - h * 0.5f, w, h, h * 0.5f, withA(C_ACCENT, 0.20f));
+		drawText(SZ_SMALL, left + 14.0f, cy - g_fontH[SZ_SMALL] * 0.5f, label, C_ACCENT);
 	}
 
 	// sleep timer: only shown while one is running (counts down, or says it waits for the end of the track)
@@ -2281,6 +2557,12 @@ void drawLibrary() {
 		case R_HOME_ARTISTS: case R_ARTIST: ic = IC_ARTIST; iconCol = C_ACCENT; break;
 		case R_HOME_GENRES: case R_GENRE: ic = IC_GENRE; iconCol = C_ACCENT; break;
 		case R_HOME_PLAYLISTS: case R_PLAYLIST: ic = IC_PLAYLIST; iconCol = C_ACCENT; break;
+		case R_HOME_NETWORK: ic = IC_FOLDER; iconCol = C_ACCENT; break;
+		case R_NETDIR: ic = IC_FOLDER; iconCol = folderYellow; break;
+		case R_NETSETTINGS: ic = IC_VIZ; iconCol = C_ACCENT; break;
+		case R_NETFIELD: ic = IC_VIZ; iconCol = C_DIM; break;
+		case R_NETCONNECT: ic = IC_PLAY; iconCol = C_ACCENT; textCol = C_ACCENT; break;
+		case R_NETKEEP: ic = IC_STAR; iconCol = smbnet::keepCache() ? C_ACCENT : C_DIM; break;
 		case R_HOME_ALL: ic = IC_NOTE; iconCol = C_ACCENT; break;
 		case R_HOME_AUTO: ic = IC_VIZ; iconCol = g_autoSecs ? C_ACCENT : C_DIM; break;
 		case R_HOME_SLEEPACT: ic = IC_CLOSE; iconCol = C_DIM; break;
