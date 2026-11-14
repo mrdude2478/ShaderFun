@@ -95,12 +95,12 @@ void main() {
     float sidePos = mod(corkscrew + sideAngle * 0.5, sideAngle) - sideAngle * 0.5;
     
     // Rectangle dimensions
-    float rectWidth = sideAngle * 3.8;
-    float rectHeight = 1.0;
+    float rectWidth = sideAngle * 0.0;
+    float rectHeight = 0.0;
     
     // Create rectangle
-    float rect = 1.0 - smoothstep(0.0, 0.1, abs(sidePos)) * 
-                 1.0 - smoothstep(0.0, 0.05, abs(segmentPos - 0.5));
+    float rect = 1.0 - smoothstep(0.2, 0.1, abs(sidePos)) * 
+                 1.0 - smoothstep(1.0, 0.8, abs(segmentPos - 0.5));
     
     // Color each rectangle differently
     vec3 color;

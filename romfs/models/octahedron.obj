@@ -1,0 +1,77 @@
+# 6-pointed 3D star (regular octahedron) with UV atlas for texturing
+# 8 triangular faces, unique UVs per face so each tip can receive a yellow band
+o Star6Point
+
+# Vertices
+v  1.000000  0.000000  0.000000   # 1 +X
+v -1.000000  0.000000  0.000000   # 2 -X
+v  0.000000  1.000000  0.000000   # 3 +Y
+v  0.000000 -1.000000  0.000000   # 4 -Y
+v  0.000000  0.000000  1.000000   # 5 +Z
+v  0.000000  0.000000 -1.000000   # 6 -Z
+
+# UV atlas layout (8 triangles packed in 2 rows of 4)
+# Each triangle ~0.24 wide, with margins
+# Row 1 (top): faces 1-4 (around +X)
+# Row 2 (bottom): faces 5-8 (around -X)
+# Tip UVs are placed so yellow rings can be drawn near the outer corners
+
+# Face 1: +X +Y +Z   (v1,v3,v5)
+vt 0.02 0.98   # v1 tip
+vt 0.24 0.98   # v3 tip
+vt 0.13 0.76   # v5 tip
+
+# Face 2: +X +Z -Y   (v1,v5,v4)
+vt 0.27 0.98   # v1 tip
+vt 0.38 0.76   # v5 tip
+vt 0.49 0.98   # v4 tip
+
+# Face 3: +X -Y -Z   (v1,v4,v6)
+vt 0.52 0.98   # v1 tip
+vt 0.74 0.98   # v4 tip
+vt 0.63 0.76   # v6 tip
+
+# Face 4: +X -Z +Y   (v1,v6,v3)
+vt 0.77 0.98   # v1 tip
+vt 0.88 0.76   # v6 tip
+vt 0.99 0.98   # v3 tip
+
+# Face 5: -X +Z +Y   (v2,v5,v3)
+vt 0.02 0.48   # v2 tip
+vt 0.13 0.26   # v5 tip
+vt 0.24 0.48   # v3 tip
+
+# Face 6: -X -Y +Z   (v2,v4,v5)
+vt 0.27 0.48   # v2 tip
+vt 0.49 0.48   # v4 tip
+vt 0.38 0.26   # v5 tip
+
+# Face 7: -X -Z -Y   (v2,v6,v4)
+vt 0.52 0.48   # v2 tip
+vt 0.63 0.26   # v6 tip
+vt 0.74 0.48   # v4 tip
+
+# Face 8: -X +Y -Z   (v2,v3,v6)
+vt 0.77 0.48   # v2 tip
+vt 0.99 0.48   # v3 tip
+vt 0.88 0.26   # v6 tip
+
+# Normals (one per face, approximate outward)
+vn  0.577350  0.577350  0.577350  #1
+vn  0.577350 -0.577350  0.577350  #2
+vn  0.577350 -0.577350 -0.577350  #3
+vn  0.577350  0.577350 -0.577350  #4
+vn -0.577350  0.577350  0.577350  #5
+vn -0.577350 -0.577350  0.577350  #6
+vn -0.577350 -0.577350 -0.577350  #7
+vn -0.577350  0.577350 -0.577350  #8
+
+# Faces (v/vt/vn)
+f 1/1/1 3/2/1 5/3/1
+f 1/4/2 5/5/2 4/6/2
+f 1/7/3 4/8/3 6/9/3
+f 1/10/4 6/11/4 3/12/4
+f 2/13/5 5/14/5 3/15/5
+f 2/16/6 4/17/6 5/18/6
+f 2/19/7 6/20/7 4/21/7
+f 2/22/8 3/23/8 6/24/8

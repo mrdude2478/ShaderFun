@@ -1,5 +1,5 @@
 //!iChannel2 "scroller.jpg"
-//!scroller on
+//!scroller off
 precision mediump float;
 uniform vec3 iResolution;
 uniform float iTime;

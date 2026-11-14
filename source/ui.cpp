@@ -3,8 +3,13 @@
 #include "tags.h"
 #include "library.h"
 #include "lyrics.h"
+#include "lrclib.h"
+#include "equalizer.h"
 #include "smbnet.h"
+#include "usbdrive.h"
+#include "shaderpick.h"
 #include <switch.h> // software keyboard (swkbd)
+#include "ftp.h"       // FTP port / user name / password (edited from Settings)
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -80,7 +85,7 @@ std::unordered_map<uint64_t, Glyph> g_glyphs;
 
 enum Icon {
 	IC_PLAY, IC_PAUSE, IC_NEXT, IC_PREV, IC_REW, IC_FFW, IC_FOLDER, IC_NOTE, IC_UP, IC_STAR,
-	IC_SPEAKER, IC_SHUFFLE, IC_REPEAT, IC_REPEAT1, IC_ONCE, IC_CLOSE, IC_ALBUM, IC_ARTIST, IC_GENRE, IC_PLAYLIST, IC_BACK, IC_VIZ, IC_COUNT
+	IC_SPEAKER, IC_SHUFFLE, IC_REPEAT, IC_REPEAT1, IC_ONCE, IC_CLOSE, IC_ALBUM, IC_ARTIST, IC_GENRE, IC_PLAYLIST, IC_BACK, IC_VIZ, IC_EQ, IC_COUNT
 };
 const int ICON_PX = 64;
 struct IconTex {
@@ -243,6 +248,12 @@ std::vector<Poly> iconShapes(Icon ic) {
 		break;
 	case IC_CLOSE:
 		addLine(s, 0.20f, 0.20f, 0.80f, 0.80f, 0.14f); addLine(s, 0.80f, 0.20f, 0.20f, 0.80f, 0.14f);
+		break;
+	case IC_EQ: // five sliders at different heights
+		addRect(s, 0.14f, 0.48f, 0.24f, 0.86f); addRect(s, 0.11f, 0.44f, 0.27f, 0.50f);
+		addRect(s, 0.34f, 0.24f, 0.44f, 0.86f); addRect(s, 0.31f, 0.20f, 0.47f, 0.26f);
+		addRect(s, 0.54f, 0.40f, 0.64f, 0.86f); addRect(s, 0.51f, 0.36f, 0.67f, 0.42f);
+		addRect(s, 0.74f, 0.14f, 0.84f, 0.86f); addRect(s, 0.71f, 0.10f, 0.87f, 0.16f);
 		break;
 	default: break;
 	}
@@ -618,7 +629,7 @@ void flush() {
 // ============================================================================ interaction state
 enum Target {
 	T_NONE = 0, T_PREV, T_REW, T_PLAY, T_FFW, T_NEXT, T_LIB, T_MODE, T_SEEK, T_VOL, T_INFO, T_AUTO,
-	T_LIST, T_CLOSE, T_HOME, T_MENU, T_OUTSIDE
+	T_LIST, T_CLOSE, T_HOME, T_MENU, T_OUTSIDE, T_EQSLIDER
 };
 
 struct HitBox { Target id; float x0, y0, x1, y1; };
@@ -672,14 +683,19 @@ struct Repeater {
 	}
 };
 Repeater g_repUp, g_repDown, g_repVol, g_repPgUp, g_repPgDown;
+Repeater g_eqLeft, g_eqRight;
+int g_eqBand = -1;                                  // the band a finger is dragging
+// where the slider track sits inside a band row, in panel coordinates (shared by drawing and touch)
+const float EQ_TRACK_X0 = 190.0f, EQ_TRACK_X1 = 560.0f, EQ_VALUE_X = 575.0f; // touching the value (right of the track) resets the band
 
 // ============================================================================ library
 enum RowKind {
 	R_UP, R_PLAYDIR, R_SETDIR, R_DIR, R_FILE,                                   // folder browser
-	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, // library views
-	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT
+	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, R_FTPSETTINGS, R_FTPFIELD, R_USBDRIVE, R_USBEJECT, R_SHADER, R_SEARCHAGAIN, // library views
+	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_USB, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT, R_HOME_SHADERS, R_HOME_SHORDER, R_HOME_SHSCOPE, R_HOME_SEARCH, R_HOME_ONLINELYR, R_HOME_SETTINGS, R_HOME_SHTOAST, R_HOME_SHFADE, R_HOME_HUDTRACK,
+	R_HOME_EQ, R_EQ_BYPASS, R_EQ_PRESET, R_EQ_BAND0, R_EQ_BAND1, R_EQ_BAND2, R_EQ_BAND3, R_EQ_BAND4, R_EQ_BAND5, R_EQ_BAND6, R_EQ_BAND7, R_EQ_BAND8, R_EQ_BAND9
 };
-enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_NETSETTINGS };
+enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_NETSETTINGS, PG_FTPSETTINGS, PG_USB, PG_SHADERS, PG_SEARCH, PG_SETTINGS, PG_EQUALIZER };
 
 struct Row {
 	RowKind kind;
@@ -707,6 +723,7 @@ struct View {
 	std::string playlistPath;                        // playlist page: the .m3u file (for deleting it)
 	bool confirmDelete = false;                      // playlist page: 'delete' was pressed once
 	std::string netPath;                             // network page: folder inside the share ("" = top)
+	uint32_t usbStamp = 0;                           // USB page: which drive list it was built from
 };
 
 enum LibMode { M_MENU, M_FOLDERS, M_PICK }; // M_PICK: the 'add to playlist' page, shown over either of the others
@@ -743,11 +760,27 @@ void ensureVisible(View& v) {
 	clampScroll(v);
 }
 
-void showToast(const std::string& t) { g_toast = t; g_toastTimer = 2.4f; }
+void showToast(const std::string& t) {
+	g_toast = t;
+	g_toastTimer = 2.4f + (t.size() > 50 ? fminf(3.0f, 0.03f * (float)(t.size() - 50)) : 0.0f); // long messages need longer to read
+}
 
 // ---- auto-change visualisation: Off -> 30 s -> 45 s -> 60 s -> 2 min -> Off
 const int AUTO_STEPS[] = { 0, 30, 45, 60, 120 };
 int g_autoSecs = 0;
+const std::vector<std::string>* g_shList = nullptr; // the shaders that can play right now (owned by main.cpp)
+const int* g_shCur = nullptr;                       // index of the shader showing now
+std::string g_lastSearch;                           // the last thing searched for
+std::string g_shaderRequest;                        // a shader chosen on the Shaders page, waiting for main.cpp
+bool g_shaderRequestPreview = false;                // ...just a preview (no toast, not remembered as your choice)
+struct ShaderPreview {                              // the Shaders page plays the highlighted shader
+	bool active = false;
+	bool keep = false;          // X was pressed: the shader on screen stays
+	std::string origin;         // what was showing when the page opened (it returns when the page is left)
+	std::string lastAsked;
+	int lastSel = -1;
+	float timer = 0.0f;
+} g_prev;
 
 std::string autoLabel() {
 	if (g_autoSecs == 0) return "off";
@@ -801,7 +834,8 @@ void buildRows(const std::string& selectPath) {
 	if (!par.empty()) f.rows.push_back({ R_UP, "Up one folder", par, "" });
 	f.rows.push_back({ R_PLAYDIR, "Play this folder", g_lib.dir, "" });
 	const bool isMusicFolder = (g_lib.dir == player::musicFolder());
-	f.rows.push_back({ R_SETDIR, isMusicFolder ? "This is your music folder" : "Set as music folder", g_lib.dir, "" });
+	if (!usbdrive::isUsbPath(g_lib.dir)) // a USB drive may not be connected next time, so it cannot be the music folder
+		f.rows.push_back({ R_SETDIR, isMusicFolder ? "This is your music folder" : "Set as music folder", g_lib.dir, "" });
 	const size_t firstEntry = f.rows.size();
 	std::vector<player::DirEntry> entries = player::listDirectory(g_lib.dir);
 	for (const player::DirEntry& e : entries) f.rows.push_back({ e.isDir ? R_DIR : R_FILE, e.name, e.path, "" });
@@ -888,6 +922,8 @@ View makeTrackView(PageKind kind, const std::string& title, const std::string& s
 	return v;
 }
 
+std::string usbSummary(); // defined with the USB page below
+
 View makeHome(int plCount) {
 	View v;
 	v.kind = PG_HOME;
@@ -899,18 +935,16 @@ View makeHome(int plCount) {
 	v.plCount = plCount;
 	const library::Snapshot& s = *v.snap;
 	const bool scan = library::scanning();
+	v.rows.push_back({ R_HOME_SEARCH, "Search", "", g_lastSearch.empty() ? std::string("songs, albums, artists") : "\"" + g_lastSearch + "\"" });
 	v.rows.push_back({ R_HOME_FOLDERS, "Folders", "", "browse the SD card" });
 	v.rows.push_back({ R_HOME_ALBUMS, "Albums", "", std::to_string(s.albums.size()) });
 	v.rows.push_back({ R_HOME_ARTISTS, "Artists", "", std::to_string(s.artists.size()) });
 	v.rows.push_back({ R_HOME_GENRES, "Genres", "", std::to_string(s.genres.size()) });
 	v.rows.push_back({ R_HOME_PLAYLISTS, "Playlists", "", std::to_string(plCount) });
-	v.rows.push_back({ R_HOME_NETWORK, "Network", "", smbnet::label() });
 	v.rows.push_back({ R_HOME_ALL, "All songs", "", std::to_string(s.tracks.size()) });
-	v.rows.push_back({ R_HOME_AUTO, "Auto-change visualisation", "", autoLabel() });
-	v.rows.push_back({ R_HOME_SLEEP, "Sleep timer", "", sleepLabel() });
-	if (player::sleepActive()) // only relevant while a sleep timer is running
-	v.rows.push_back({ R_HOME_SLEEPACT, "When the sleep timer ends", "", player::configInt("sleep_quit", 1) ? "close the app" : "pause only" });
-	v.rows.push_back({ R_HOME_RESUME, "Resume on launch", "", player::configInt("resume_play", 0) ? "keeps playing" : "starts paused" });
+	v.rows.push_back({ R_HOME_NETWORK, "Network", "", smbnet::label() });
+	v.rows.push_back({ R_HOME_USB, "USB drive", "", usbSummary() });
+	v.rows.push_back({ R_HOME_SETTINGS, "Settings", "", "sleep timer, lyrics, shaders..." });
 	v.rows.push_back({ R_HOME_RESCAN, "Rescan library", "",
 		scan ? "scanning " + std::to_string(library::scanDone()) + " / " + std::to_string(library::scanTotal()) : "look for new music" });
 	v.subtitle = scan ? "Scanning... " + std::to_string(library::scanDone()) + " / " + std::to_string(library::scanTotal())
@@ -1238,8 +1272,8 @@ std::string suggestPlaylistName() {
 void saveQueueAsPlaylist() {
 	std::vector<std::string> q;
 	for (const std::string& p : player::chosenQueuePaths()) // not the tracks the player loaded by itself
-		if (!smbnet::isRemote(p)) q.push_back(p);       // network songs cannot be saved in playlists yet
-	if (q.empty()) { showToast("You haven't queued anything yet (network songs can't be saved in playlists)"); return; }
+		if (!smbnet::isRemote(p) && !usbdrive::isUsbPath(p)) q.push_back(p); // network / USB songs cannot be saved in playlists yet
+	if (q.empty()) { showToast("You haven't queued anything yet (network and USB songs can't be saved in playlists)"); return; }
 	mkdir("sdmc:/switch/shaderfun", 0777);
 	mkdir(library::playlistsDir().c_str(), 0777);
 	char stamp[48];
@@ -1279,6 +1313,254 @@ void libDeletePlaylist(const std::string& path, const std::string& name) {
 
 // ---- network browser (an SMB share): the folder is listed in the background and the page fills in when it arrives
 std::string netJoin(const std::string& dir, const std::string& name) { return dir.empty() ? name : dir + "/" + name; }
+
+// ---- Shaders page: every shader that can play right now; A stars / unstars one, X shows it
+std::string shaderLabel(const std::string& path) {
+	std::string n = player::baseName(path);
+	const size_t dot = n.find_last_of('.');
+	return dot == std::string::npos || dot == 0 ? n : n.substr(0, dot);
+}
+
+std::string shaderFolder(const std::string& path) { // the folder it is in (Docked, ...), "" for the top folder
+	const size_t slash = path.find_last_of('/');
+	if (slash == std::string::npos) return "";
+	const std::string folder = player::baseName(path.substr(0, slash));
+	const std::string low = lowerStr(folder);
+	return (low == "shaders" || low == "test") ? std::string() : folder;
+}
+
+View makeShadersView() {
+	View v;
+	v.kind = PG_SHADERS;
+	v.title = "Shaders";
+	const int n = g_shList ? (int)g_shList->size() : 0;
+	v.subtitle = std::to_string(n) + " available now  -  A: favourite on/off   X: show it";
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	for (int i = 0; i < n; i++) {
+		const std::string& p = (*g_shList)[i];
+		v.rows.push_back({ R_SHADER, shaderLabel(p), p, shaderFolder(p), i });
+	}
+	v.empty = (n == 0);
+	v.emptyMsg = "No shaders found";
+	v.sel = (g_shCur && n > 0 && *g_shCur >= 0 && *g_shCur < n) ? *g_shCur + 1 : 0; // starts on the one that is showing
+	ensureVisible(v);
+	v.scrollDisp = v.scroll;
+	return v;
+}
+
+// ---- USB drives (docked): the library mounts them as "ums0:" etc., and the folder browser handles them like any folder
+std::string usbSummary() {
+	if (!usbdrive::available()) return "not available";
+	const std::vector<usbdrive::Drive> d = usbdrive::drives();
+	if (d.empty()) return "not connected";
+	return d.size() == 1 ? d[0].name : std::to_string(d.size()) + " drives";
+}
+
+std::string capacityText(uint64_t bytes) {
+	char buf[32];
+	const double gb = (double)bytes / (1000.0 * 1000.0 * 1000.0);
+	if (gb >= 1000.0) snprintf(buf, sizeof(buf), "%.1f TB", gb / 1000.0);
+	else snprintf(buf, sizeof(buf), "%.0f GB", gb);
+	return buf;
+}
+
+View makeUsbView() {
+	View v;
+	v.kind = PG_USB;
+	v.title = "USB drive";
+	v.subtitle = "Connected to the dock";
+	v.usbStamp = usbdrive::changeCounter();
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	const std::vector<usbdrive::Drive> drives = usbdrive::drives();
+	for (const usbdrive::Drive& d : drives) {
+		v.rows.push_back({ R_USBDRIVE, d.name, d.mount + "/", d.fsType + "   " + capacityText(d.capacity) });
+		v.rows.push_back({ R_USBEJECT, "Safely remove " + d.name, d.mount, "" });
+	}
+	v.empty = drives.empty();
+	v.emptyMsg = usbdrive::available()
+		? "No USB drive found. Connect one to the dock and wait a few seconds."
+		: "USB drives are not available (" + usbdrive::lastError() + ")";
+	v.sel = drives.empty() ? 0 : 1;
+	return v;
+}
+
+// ---- Search: songs, albums and artists from the library (tags read by the scan), typed with the Switch keyboard
+static const char* const kLatinFold[192] = {
+	"a", "a", "a", "a", "a", "a", "ae", "c",
+	"e", "e", "e", "e", "i", "i", "i", "i",
+	"d", "n", "o", "o", "o", "o", "o", "x",
+	"o", "u", "u", "u", "u", "y", "th", "ss",
+	"a", "a", "a", "a", "a", "a", "ae", "c",
+	"e", "e", "e", "e", "i", "i", "i", "i",
+	"d", "n", "o", "o", "o", "o", "o", " ",
+	"o", "u", "u", "u", "u", "y", "th", "y",
+	"a", "a", "a", "a", "a", "a", "c", "c",
+	"c", "c", "c", "c", "c", "c", "d", "d",
+	"d", "d", "e", "e", "e", "e", "e", "e",
+	"e", "e", "e", "e", "g", "g", "g", "g",
+	"g", "g", "g", "g", "h", "h", "h", "h",
+	"i", "i", "i", "i", "i", "i", "i", "i",
+	"i", "i", "ij", "ij", "j", "j", "k", "k",
+	"k", "l", "l", "l", "l", "l", "l", "ŀ",
+	"ŀ", "l", "l", "n", "n", "n", "n", "n",
+	"n", "n", "n", "n", "o", "o", "o", "o",
+	"o", "o", "oe", "oe", "r", "r", "r", "r",
+	"r", "r", "s", "s", "s", "s", "s", "s",
+	"s", "s", "t", "t", "t", "t", "t", "t",
+	"u", "u", "u", "u", "u", "u", "u", "u",
+	"u", "u", "u", "u", "w", "w", "y", "y",
+	"y", "z", "z", "z", "z", "z", "z", "s"
+};
+
+// lower case, and accented Latin letters become plain ones ("Beyoncé" -> "beyonce")
+std::string foldText(const std::string& in) {
+	std::string out;
+	out.reserve(in.size());
+	for (size_t i = 0; i < in.size();) {
+		const unsigned char c = (unsigned char)in[i];
+		uint32_t cp = c;
+		size_t len = 1;
+		if (c >= 0xF0 && i + 3 < in.size()) { cp = ((c & 0x07u) << 18) | (((unsigned char)in[i + 1] & 0x3Fu) << 12) | (((unsigned char)in[i + 2] & 0x3Fu) << 6) | ((unsigned char)in[i + 3] & 0x3Fu); len = 4; }
+		else if (c >= 0xE0 && i + 2 < in.size()) { cp = ((c & 0x0Fu) << 12) | (((unsigned char)in[i + 1] & 0x3Fu) << 6) | ((unsigned char)in[i + 2] & 0x3Fu); len = 3; }
+		else if (c >= 0xC0 && i + 1 < in.size()) { cp = ((c & 0x1Fu) << 6) | ((unsigned char)in[i + 1] & 0x3Fu); len = 2; }
+
+		if (cp < 0x80) out += (char)tolower((int)cp);
+		else if (cp >= 0xC0 && cp < 0xC0 + 192) out += kLatinFold[cp - 0xC0];
+		else if (cp >= 0x410 && cp <= 0x42F) { cp += 0x20; out += (char)(0xC0 | (cp >> 6)); out += (char)(0x80 | (cp & 0x3F)); } // Cyrillic capitals
+		else if (cp >= 0x400 && cp <= 0x40F) { cp += 0x50; out += (char)(0xC0 | (cp >> 6)); out += (char)(0x80 | (cp & 0x3F)); }
+		else out.append(in, i, len);
+		i += len;
+	}
+	return out;
+}
+
+// The tags of every track, folded once per library snapshot, so a search is only substring checks
+struct SearchCache {
+	std::shared_ptr<const library::Snapshot> snap; // kept so a new snapshot is recognised
+	std::vector<std::string> title, artist, album, other, artistName, albumName;
+} g_sc;
+
+void ensureSearchCache(const std::shared_ptr<const library::Snapshot>& snap) {
+	if (g_sc.snap == snap) return;
+	g_sc = SearchCache();
+	g_sc.snap = snap;
+	const library::Snapshot& s = *snap;
+	const size_t n = s.tracks.size();
+	g_sc.title.resize(n); g_sc.artist.resize(n); g_sc.album.resize(n); g_sc.other.resize(n);
+	for (size_t i = 0; i < n; i++) {
+		const library::Track& t = s.tracks[i];
+		g_sc.title[i] = foldText(library::displayTitle(t));
+		g_sc.artist[i] = foldText(t.artist);
+		g_sc.album[i] = foldText(library::albumDisplayName(t));
+		g_sc.other[i] = foldText(t.albumArtist + " " + t.genre + " " + t.year);
+	}
+	for (const library::Group& g : s.artists) g_sc.artistName.push_back(foldText(g.name));
+	for (const library::Group& g : s.albums) g_sc.albumName.push_back(foldText(g.name + " " + g.sub));
+}
+
+bool hasText(const std::string& hay, const std::string& needle) { return hay.find(needle) != std::string::npos; }
+
+View makeSearchView(const std::string& query) {
+	View v;
+	v.kind = PG_SEARCH;
+	v.title = "Search: " + query;
+	v.snap = library::snapshot();
+	const library::Snapshot& s = *v.snap;
+	ensureSearchCache(v.snap);
+
+	std::vector<std::string> words; // every word has to be found (anywhere, any order)
+	{
+		const std::string q = foldText(query);
+		size_t p = 0;
+		while (p < q.size()) {
+			while (p < q.size() && q[p] == ' ') p++;
+			size_t e = q.find(' ', p);
+			if (e == std::string::npos) e = q.size();
+			if (e > p) words.push_back(q.substr(p, e - p));
+			p = e;
+		}
+	}
+
+	const size_t MAX_SONGS = 1000, MAX_GROUPS = 100;
+	std::vector<std::pair<int, int>> songs; // (score, track index): a title match ranks above an artist match, then album...
+	for (size_t i = 0; i < s.tracks.size() && !words.empty(); i++) {
+		int score = 0;
+		bool all = true;
+		for (const std::string& w : words) {
+			if (hasText(g_sc.title[i], w)) continue;
+			if (hasText(g_sc.artist[i], w)) { score += 1; continue; }
+			if (hasText(g_sc.album[i], w)) { score += 2; continue; }
+			if (hasText(g_sc.other[i], w)) { score += 3; continue; }
+			all = false;
+			break;
+		}
+		if (all) songs.push_back({ score, (int)i });
+	}
+	std::stable_sort(songs.begin(), songs.end(), [](const std::pair<int, int>& a, const std::pair<int, int>& b) { return a.first < b.first; });
+	const size_t songTotal = songs.size();
+	if (songs.size() > MAX_SONGS) songs.resize(MAX_SONGS);
+
+	std::vector<library::Group> artistHits, albumHits;
+	for (size_t i = 0; i < s.artists.size() && artistHits.size() < MAX_GROUPS && !words.empty(); i++) {
+		bool all = true;
+		for (const std::string& w : words) if (!hasText(g_sc.artistName[i], w)) { all = false; break; }
+		if (all) artistHits.push_back(s.artists[i]);
+	}
+	for (size_t i = 0; i < s.albums.size() && albumHits.size() < MAX_GROUPS && !words.empty(); i++) {
+		bool all = true;
+		for (const std::string& w : words) if (!hasText(g_sc.albumName[i], w)) { all = false; break; }
+		if (all) albumHits.push_back(s.albums[i]);
+	}
+
+	// artists and albums go in v.groups (R_ARTIST / R_ALBUM rows point into it, exactly as on the Artists and Albums pages)
+	v.groups = artistHits;
+	v.groups.insert(v.groups.end(), albumHits.begin(), albumHits.end());
+
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_SEARCHAGAIN, "Search again", "", "" });
+	for (size_t i = 0; i < artistHits.size(); i++)
+		v.rows.push_back({ R_ARTIST, artistHits[i].name, "", plural(artistHits[i].tracks.size(), "track", "tracks"), (int)i });
+	for (size_t i = 0; i < albumHits.size(); i++)
+		v.rows.push_back({ R_ALBUM, albumHits[i].name, "", albumHits[i].sub, (int)(artistHits.size() + i) });
+	if (songs.size() > 1) v.rows.push_back({ R_PLAYALL, "Play all " + std::to_string(songs.size()) + " songs", "", "" });
+	for (size_t k = 0; k < songs.size(); k++) {
+		const library::Track& t = s.tracks[songs[k].second];
+		const std::string who = t.artist.empty() ? t.albumArtist : t.artist;
+		const std::string alb = library::albumDisplayName(t);
+		v.rows.push_back({ R_TRACK, library::displayTitle(t), t.path, who.empty() ? alb : who + " - " + alb, (int)k });
+		v.trackPaths.push_back(t.path);
+	}
+
+	std::string sub = plural(songTotal, "song", "songs");
+	if (!artistHits.empty()) sub += "  -  " + plural(artistHits.size(), "artist", "artists");
+	if (!albumHits.empty()) sub += "  -  " + plural(albumHits.size(), "album", "albums");
+	if (songTotal > songs.size()) sub += "  (first " + std::to_string(songs.size()) + " shown)";
+	if (library::scanning()) sub += "  -  library still scanning (" + std::to_string(library::scanDone()) + " of " + std::to_string(library::scanTotal()) + ")";
+	v.subtitle = sub;
+	v.empty = songs.empty() && artistHits.empty() && albumHits.empty();
+	v.emptyMsg = library::scanning() ? "Nothing found yet - the library is still being built" : "Nothing found";
+	v.sel = v.empty ? 1 : 2; // on the first result
+	return v;
+}
+
+// Asks for the text and shows the results. again = replace the results page we are on instead of opening a new one.
+void libSearch(bool again) {
+	const std::shared_ptr<const library::Snapshot> snap = library::snapshot();
+	if (!snap || snap->tracks.empty()) {
+		showToast(library::scanning() ? "The library is still being built - try again in a moment" : "The library is empty - scan your music first");
+		return;
+	}
+	std::string text;
+	const NameResult nr = askText("Search", "A song, an artist or an album", g_lastSearch, 60, false, text);
+	if (nr == NAME_UNAVAILABLE) { showToast("The keyboard could not be opened"); return; }
+	if (nr == NAME_CANCELLED) return;
+	if (text.empty()) { showToast("Type something to search for"); return; }
+	g_lastSearch = text;
+	View sv = makeSearchView(text);
+	if (again && !g_lib.stack.empty() && g_lib.stack.back().kind == PG_SEARCH) g_lib.stack.back() = std::move(sv);
+	else libPush(std::move(sv));
+	if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; // the menu row shows the last search
+}
 
 // ---- network settings: server, share and login are typed with the Switch keyboard (they are saved in smb.ini)
 View makeNetSettingsView() {
@@ -1348,6 +1630,70 @@ void libEditNetField(int field) {
 		cv.scrollDisp = cv.scroll;
 	}
 	showToast(pw ? "Password saved" : "Saved");
+}
+
+void settingsChanged(); // defined with the Settings page below
+
+// ---- FTP settings: port, user name and password are typed with the Switch keyboard (saved in ftp_config.txt)
+View makeFtpSettingsView() {
+	View v;
+	v.kind = PG_FTPSETTINGS;
+	v.title = "FTP settings";
+	v.subtitle = ftp_is_running() ? "The server is running: a new port is used after you stop and start it (Minus)" : "Used when you start the FTP server with the Minus button";
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_FTPFIELD, "Port", "", std::to_string(ftp_get_port()), 0 });
+	v.rows.push_back({ R_FTPFIELD, "User name", "", ftp_get_username(), 1 });
+	v.rows.push_back({ R_FTPFIELD, "Password", "", std::string(std::min<size_t>(strlen(ftp_get_password()), 10), '*'), 2 });
+	v.sel = 1;
+	return v;
+}
+
+void libEditFtpField(int field) {
+	const char* header = "";
+	const char* guide = "";
+	std::string initial;
+	int maxLen = 31;
+	bool pw = false;
+	switch (field) {
+	case 0: header = "FTP port"; guide = "A number from 1 to 65535 (default 5000)"; initial = std::to_string(ftp_get_port()); maxLen = 5; break;
+	case 1: header = "FTP user name"; guide = "No spaces (default: switch)"; initial = ftp_get_username(); break;
+	case 2: header = "FTP password"; guide = "No spaces (default: ftp123)"; pw = true; break;
+	default: return;
+	}
+	std::string out;
+	const NameResult nr = askText(header, guide, initial, maxLen, pw, out);
+	if (nr == NAME_UNAVAILABLE) { showToast("The keyboard could not be opened"); return; }
+	if (nr == NAME_CANCELLED) return;
+
+	bool ok = false;
+	if (field == 0) {
+		bool digits = !out.empty();
+		for (char ch : out) if (ch < '0' || ch > '9') digits = false;
+		ok = digits && ftp_set_port(atoi(out.c_str()));
+		if (!ok) { showToast("The port must be a number from 1 to 65535"); return; }
+	}
+	else if (field == 1) {
+		ok = ftp_set_username(out.c_str());
+		if (!ok) { showToast("The user name can't be empty or contain spaces (max 31 characters)"); return; }
+	}
+	else {
+		ok = ftp_set_password(out.c_str());
+		if (!ok) { showToast("The password can't be empty or contain spaces (max 31 characters)"); return; }
+	}
+
+	View& cv = cur();
+	if (cv.kind == PG_FTPSETTINGS) { // redraw the page with the new value, keeping the selection
+		const int sel = cv.sel;
+		const float sc = cv.scroll;
+		cv = makeFtpSettingsView();
+		cv.sel = sel;
+		cv.scroll = sc;
+		clampScroll(cv);
+		cv.scrollDisp = cv.scroll;
+	}
+	settingsChanged(); // the Settings page shows the user name and port in its FTP row
+	if (field == 0 && ftp_is_running()) showToast("Saved. The new port is used after the FTP server is restarted (Minus twice)");
+	else showToast(pw ? "Password saved" : "Saved");
 }
 
 View makeNetworkView(const std::string& dir) {
@@ -1507,6 +1853,129 @@ void libRenamePlaylist() {
 	showToast("Renamed to: " + wanted);
 }
 
+// ---- Settings page: the switches that used to crowd the main menu
+View makeSettingsView() {
+	View v;
+	v.kind = PG_SETTINGS;
+	v.title = "Settings";
+	v.subtitle = "Changes are saved straight away";
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_HOME_SLEEP, "Sleep timer", "", sleepLabel() });
+	if (player::sleepActive()) // only relevant while a sleep timer is running
+		v.rows.push_back({ R_HOME_SLEEPACT, "When the sleep timer ends", "", player::configInt("sleep_quit", 1) ? "close the app" : "pause only" });
+	v.rows.push_back({ R_HOME_EQ, "Equalizer", "", equalizer::bypass() ? std::string("off") : std::string(equalizer::presetName(equalizer::currentPreset())) });
+	v.rows.push_back({ R_HOME_ONLINELYR, "Online lyrics", "", player::configInt("online_lyrics", 0) ? "on (lrclib.net)" : "off" });
+	v.rows.push_back({ R_HOME_RESUME, "Resume on launch", "", player::configInt("resume_play", 0) ? "keeps playing" : "starts paused" });
+	v.rows.push_back({ R_HOME_AUTO, "Auto-change visualisation", "", autoLabel() });
+	v.rows.push_back({ R_HOME_SHADERS, "Shaders", "", std::to_string(shaderpick::favouriteCount()) + (shaderpick::favouriteCount() == 1 ? " favourite" : " favourites") });
+	v.rows.push_back({ R_HOME_SHSCOPE, "Shader list", "", shaderpick::scope() == shaderpick::SCOPE_FAVOURITES ? "favourites only" : "all shaders" });
+	v.rows.push_back({ R_HOME_SHORDER, "Shader order", "", shaderpick::order() == shaderpick::ORDER_RANDOM ? "random" : "in order" });
+	v.rows.push_back({ R_FTPSETTINGS, "FTP server", "", std::string(ftp_get_username()) + " @ port " + std::to_string(ftp_get_port()) });
+	v.rows.push_back({ R_HOME_SHTOAST, "Show shader name when it changes", "", player::configInt("shader_toast", 1) ? "on" : "off" });
+	v.rows.push_back({ R_HOME_SHFADE, "Smooth shader changes", "", player::configInt("shader_fade", 1) ? "on" : "off" });
+	v.rows.push_back({ R_HOME_HUDTRACK, "Show player when a new track starts", "", player::configInt("hud_on_track", 1) ? "on" : "off" });
+	v.sel = 1;
+	return v;
+}
+
+std::string eqGainText(int g) {
+	char buf[16];
+	if (g == 0) snprintf(buf, sizeof(buf), "0 dB");
+	else snprintf(buf, sizeof(buf), "%+d dB", g);
+	return buf;
+}
+
+std::string eqSubtitle() {
+	std::string s = "D-pad: left/right   -   touch: drag a bar";
+	const int cut = equalizer::levelReductionDb();
+	if (cut < 0) s += "   -   level " + std::to_string(cut) + " dB (stops clipping)";
+	return s;
+}
+
+// the gains are kept as one setting, "eq_gains" = ten numbers. The setting is changed on every nudge, but config.ini is
+// only written 1 second after the last change (see update()), so dragging a slider does not write the file again and again,
+// and the settings are on the SD card even if the app is closed in an unusual way.
+float g_eqSaveDelay = 0.0f;
+std::string g_eqGainsText;
+void eqSaveGains() {
+	std::string t;
+	for (int b = 0; b < equalizer::BAND_COUNT; b++) t += std::to_string(equalizer::gain(b)) + (b + 1 < equalizer::BAND_COUNT ? "," : "");
+	player::setConfigString("eq_gains", t, false);
+	g_eqGainsText = t;
+	g_eqSaveDelay = 1.0f;
+}
+
+// the Equalizer page is showing: update its texts in place (no rebuild, so a finger drag is not interrupted)
+void eqRefreshPage() {
+	if (g_lib.stack.empty() || g_lib.stack.back().kind != PG_EQUALIZER) return;
+	View& v = g_lib.stack.back();
+	for (Row& r : v.rows) {
+		if (r.kind >= R_EQ_BAND0 && r.kind < (RowKind)(R_EQ_BAND0 + equalizer::BAND_COUNT)) r.sub = eqGainText(equalizer::gain(r.kind - R_EQ_BAND0));
+		else if (r.kind == R_EQ_PRESET) r.sub = equalizer::presetName(equalizer::currentPreset());
+		else if (r.kind == R_EQ_BYPASS) r.sub = equalizer::bypass() ? "off (bypassed)" : "on";
+	}
+	v.subtitle = eqSubtitle();
+}
+
+View makeEqView() {
+	View v;
+	v.kind = PG_EQUALIZER;
+	v.title = "Equalizer";
+	v.subtitle = eqSubtitle();
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_EQ_BYPASS, "Equalizer", "", equalizer::bypass() ? "off (bypassed)" : "on" });
+	v.rows.push_back({ R_EQ_PRESET, "Preset", "", equalizer::presetName(equalizer::currentPreset()) });
+	for (int b = 0; b < equalizer::BAND_COUNT; b++)
+		v.rows.push_back({ (RowKind)(R_EQ_BAND0 + b), equalizer::bandName(b), "", eqGainText(equalizer::gain(b)), b });
+	v.sel = equalizer::bypass() ? 1 : 3; // start on the on/off row while off, otherwise on the first band
+	return v;
+}
+
+// a setting changed: refresh the main menu and, when it is showing, the Settings page (keeping the selection)
+// a setting changed: refresh the main menu and any Settings page that is in the stack (keeping the selection)
+void settingsChanged() {
+	if (g_lib.stack.empty()) return;
+	g_lib.stack[0].dirty = true;
+	for (View& cv : g_lib.stack) {
+		if (cv.kind != PG_SETTINGS) continue;
+		const int sel = cv.sel;
+		const float sc = cv.scroll;
+		cv = makeSettingsView();
+		cv.sel = std::min(std::max(sel, 0), (int)cv.rows.size() - 1);
+		cv.scroll = sc;
+		clampScroll(cv);
+		cv.scrollDisp = cv.scroll;
+	}
+}
+
+// the equalizer changed (a gain, a preset, on/off): remember it, redraw the page, and refresh the Settings row if the preset name changed
+void eqAfterChange() {
+	eqSaveGains();
+	eqRefreshPage();
+	static int lastPreset = -2;
+	const int p = equalizer::currentPreset();
+	if (p != lastPreset) { lastPreset = p; settingsChanged(); }
+}
+
+void eqCyclePreset(int dir) {
+	int p = equalizer::currentPreset();
+	if (p == equalizer::PRESET_CUSTOM) p = equalizer::PRESET_FLAT;
+	else p = (p + dir + equalizer::PRESET_COUNT) % equalizer::PRESET_COUNT;
+	equalizer::applyPreset(p);
+	showToast(std::string("Equalizer preset: ") + equalizer::presetName(p));
+	eqAfterChange();
+}
+
+// a finger on a band's slider: x -> gain (-12..+12 dB, whole dB)
+void eqSetFromX(int band, float x) {
+	float f = (x - EQ_TRACK_X0) / (EQ_TRACK_X1 - EQ_TRACK_X0);
+	f = fminf(1.0f, fmaxf(0.0f, f));
+	const int db = (int)lroundf((float)equalizer::MIN_DB + f * (float)(equalizer::MAX_DB - equalizer::MIN_DB));
+	if (db != equalizer::gain(band)) { equalizer::setGain(band, db); eqAfterChange(); }
+}
+
+void lyricsAskAgain(); // defined with the lyrics code below
+
 void libActivate(int idx) {
 	View& v = cur();
 	if (idx < 0 || idx >= (int)v.rows.size()) return;
@@ -1539,7 +2008,75 @@ void libActivate(int idx) {
 	case R_HOME_GENRES: libPush(makeGroupList(PG_GENRES)); break;
 	case R_HOME_PLAYLISTS: libUpdatePlaylistCount(); libPush(makePlaylistsView()); break;
 	case R_HOME_NETWORK: libOpenNetwork(); break;
+	case R_HOME_SEARCH: libSearch(false); break;
+	case R_HOME_HUDTRACK:
+		player::setConfigInt("hud_on_track", player::configInt("hud_on_track", 1) ? 0 : 1);
+		showToast(player::configInt("hud_on_track", 1) ? "The player is shown when the next track starts" : "The player stays hidden when the next track starts (pressing a button still shows it)");
+		settingsChanged();
+		break;
+	case R_HOME_SHFADE:
+		player::setConfigInt("shader_fade", player::configInt("shader_fade", 1) ? 0 : 1);
+		showToast(player::configInt("shader_fade", 1) ? "The next and previous shaders are prepared early (L/R are quicker) and automatic changes fade in" : "Shaders load only when they are needed again");
+		settingsChanged();
+		break;
+	case R_HOME_SHTOAST:
+		player::setConfigInt("shader_toast", player::configInt("shader_toast", 1) ? 0 : 1);
+		showToast(player::configInt("shader_toast", 1) ? "The shader name is shown when it changes" : "The shader name is no longer shown");
+		settingsChanged();
+		break;
+	case R_HOME_SETTINGS: libPush(makeSettingsView()); break;
+	case R_HOME_ONLINELYR: {
+		const bool on = !player::configInt("online_lyrics", 0);
+		player::setConfigInt("online_lyrics", on ? 1 : 0);
+		showToast(on ? "Online lyrics on: a song's artist and title are sent to lrclib.net when it has no lyrics of its own"
+		             : "Online lyrics off");
+		lyricsAskAgain(); // look again for the song that is playing
+		settingsChanged();
+		break;
+	}
+	case R_SEARCHAGAIN: libSearch(true); break;
+	case R_HOME_SHADERS: libPush(makeShadersView()); break;
+	case R_HOME_SHORDER:
+		shaderpick::setOrder(shaderpick::order() == shaderpick::ORDER_RANDOM ? shaderpick::ORDER_LIST : shaderpick::ORDER_RANDOM);
+		showToast(shaderpick::order() == shaderpick::ORDER_RANDOM ? "Shaders: random order (every shader once before any repeats)" : "Shaders: in list order");
+		settingsChanged();
+		break;
+	case R_HOME_SHSCOPE:
+		shaderpick::setScope(shaderpick::scope() == shaderpick::SCOPE_FAVOURITES ? shaderpick::SCOPE_ALL : shaderpick::SCOPE_FAVOURITES);
+		showToast(shaderpick::scope() == shaderpick::SCOPE_FAVOURITES
+			? (shaderpick::favouriteCount() > 0 ? "Shaders: favourites only" : "Shaders: favourites only (you have none yet - star some on the Shaders page)")
+			: "Shaders: all of them");
+		settingsChanged();
+		break;
+	case R_SHADER: {
+		const bool now = shaderpick::toggleFavourite(row.path);
+		showToast(std::string(now ? "\xE2\x98\x85 Added to favourites: " : "Removed from favourites: ") + row.label);
+		View& cv = cur();
+		if (cv.kind == PG_SHADERS) { // redraw the page, keeping the selection
+			const int sel = cv.sel;
+			const float sc = cv.scroll;
+			cv = makeShadersView();
+			cv.sel = sel;
+			cv.scroll = sc;
+			clampScroll(cv);
+			cv.scrollDisp = cv.scroll;
+		}
+		if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; // the favourites count on the menu page
+		break;
+	}
+	case R_HOME_USB: libPush(makeUsbView()); break;
+	case R_USBDRIVE: g_lib.mode = M_FOLDERS; libEnter(row.path); break;
+	case R_USBEJECT: {
+		const std::string mount = row.path;
+		const std::string playing = player::currentPath();
+		if (usbdrive::isUsbPath(playing) && playing.compare(0, mount.size(), mount) == 0) player::stop(); // do not play from a drive that is going away
+		if (usbdrive::unmount(mount)) showToast("You can unplug the drive now");
+		else showToast("Could not remove the drive");
+		break;
+	}
 	case R_NETSETTINGS: libPush(makeNetSettingsView()); break;
+	case R_FTPSETTINGS: libPush(makeFtpSettingsView()); break;
+	case R_FTPFIELD: libEditFtpField(row.ref); break;
 	case R_NETFIELD: libEditNetField(row.ref); break;
 	case R_NETCONNECT: libNetConnect(); break;
 	case R_NETKEEP: {
@@ -1566,17 +2103,37 @@ void libActivate(int idx) {
 		break;
 	}
 	case R_HOME_ALL: libPush(makeAllSongs()); break;
-	case R_HOME_AUTO: cycleAuto(); if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; break;
+	case R_HOME_AUTO: cycleAuto(); settingsChanged(); break;
 	case R_HOME_SLEEPACT:
 		player::setConfigInt("sleep_quit", player::configInt("sleep_quit", 1) ? 0 : 1);
 		showToast(player::configInt("sleep_quit", 1) ? "Sleep timer: pauses the music, then closes the app" : "Sleep timer: only pauses the music");
-		if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true;
+		settingsChanged();
 		break;
-	case R_HOME_SLEEP: cycleSleep(); if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; break;
+	case R_HOME_SLEEP: cycleSleep(); settingsChanged(); break;
+		case R_HOME_EQ: libPush(makeEqView()); break;
+	case R_EQ_BYPASS: {
+		const bool b = !equalizer::bypass();
+		equalizer::setBypass(b);
+		player::setConfigInt("eq_bypass", b ? 1 : 0);
+		showToast(b ? "Equalizer off (audio straight through)" : "Equalizer on");
+		eqAfterChange();
+		settingsChanged(); // the Settings page shows on / off too
+		break;
+	}
+	case R_EQ_PRESET: eqCyclePreset(+1); break;
+	case R_EQ_BAND0: case R_EQ_BAND1: case R_EQ_BAND2: case R_EQ_BAND3: case R_EQ_BAND4:
+	case R_EQ_BAND5: case R_EQ_BAND6: case R_EQ_BAND7: case R_EQ_BAND8: case R_EQ_BAND9: {
+		// A on a band row resets that band to 0 dB
+		const int b = row.ref;
+		equalizer::setGain(b, 0);
+		showToast(std::string("Reset ") + equalizer::bandName(b) + " to 0 dB");
+		eqAfterChange();
+		break;
+	}
 	case R_HOME_RESUME:
 		player::setConfigInt("resume_play", player::configInt("resume_play", 0) ? 0 : 1);
 		showToast(player::configInt("resume_play", 0) ? "On launch: music continues playing" : "On launch: music is ready but paused");
-		if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true;
+		settingsChanged();
 		break;
 	case R_HOME_RESCAN:
 		library::startScan(player::musicFolder());
@@ -1656,7 +2213,7 @@ void libAddToPlaylistPicker() {
 	}
 	if (paths.empty()) { showToast("Nothing to add there"); return; }
 	for (const std::string& p : paths)
-		if (smbnet::isRemote(p)) { showToast("Songs from the network can't be added to playlists yet"); return; }
+		if (smbnet::isRemote(p) || usbdrive::isUsbPath(p)) { showToast("Songs from the network or a USB drive can't be added to playlists yet"); return; }
 	g_lib.pickReturn = g_lib.mode;
 	g_lib.pick = makePickPlaylistView(paths, name);
 	g_lib.mode = M_PICK;
@@ -1668,7 +2225,7 @@ void libAddToPlaylistPicker() {
 // ---- jump by letter (right stick left/right): previous / next first letter in the list
 char rowLetter(const Row& r) {
 	switch (r.kind) {
-	case R_DIR: case R_FILE: case R_TRACK: case R_ALBUM: case R_ARTIST: case R_GENRE: case R_PLAYLIST: case R_PICKPLAYLIST: case R_NETDIR: break;
+	case R_DIR: case R_FILE: case R_TRACK: case R_ALBUM: case R_ARTIST: case R_GENRE: case R_PLAYLIST: case R_PICKPLAYLIST: case R_NETDIR: case R_SHADER: break;
 	default: return 0; // Back / Play all / home rows etc. do not belong to a letter
 	}
 	if (r.label.empty()) return '#';
@@ -1733,6 +2290,12 @@ void libPlaySelected() {
 	case R_TRACK: case R_PLAYALL:
 		libActivate(v.sel);
 		return;
+	case R_SHADER: // show this shader now and keep it (main.cpp picks the request up)
+		g_shaderRequest = row.path;
+		g_shaderRequestPreview = false;
+		g_prev.keep = true;
+		libClose();
+		return;
 	default:
 		showToast("Highlight an album, artist, genre or playlist to play it");
 		return;
@@ -1762,7 +2325,7 @@ void libJumpTo(int index) {
 
 bool rowOpensSomething(RowKind k) {
 	return k == R_DIR || k == R_ALBUM || k == R_ARTIST || k == R_GENRE || k == R_PLAYLIST ||
-		k == R_NETDIR || k == R_NETSETTINGS || (k >= R_HOME_FOLDERS && k <= R_HOME_ALL);
+		k == R_NETDIR || k == R_NETSETTINGS || k == R_FTPSETTINGS || k == R_HOME_SHADERS || k == R_HOME_SEARCH || k == R_HOME_SETTINGS || (k >= R_HOME_FOLDERS && k <= R_HOME_ALL);
 }
 
 // ============================================================================ track info panel
@@ -1870,7 +2433,10 @@ struct LyricsState {
 	float alpha = 0.0f;         // fade in / out
 	float linePos = 0.0f;       // smoothed (fractional) index of the line being sung, for the sliding animation
 	float scroll = 0.0f;        // page: scroll offset in pixels
+	std::string onlineFor;      // the song an online lookup was already started for
 } g_lyr;
+
+void lyricsAskAgain() { g_lyr.onlineFor.clear(); }
 
 const float LYR_AREA_TOP = 140.0f;
 const Color LYR_CURRENT = { 1.00f, 0.92f, 0.35f, 1.0f }; // the line being sung (yellow)
@@ -1892,6 +2458,7 @@ void lyricsRefresh() {
 	g_lyr.data = lyrics::Lyrics();
 	g_lyr.linePos = 0.0f;
 	g_lyr.scroll = 0.0f;
+	g_lyr.onlineFor.clear();
 	if (!path.empty()) lyrics::load(path, g_lyr.data);
 	if (g_lyr.data.found && !g_lyr.data.timed) g_lyr.wanted = false; // a page does not open by itself on the next song
 }
@@ -2043,7 +2610,14 @@ bool lyricsAvailable() { return g_lyr.data.found; }
 void lyricsShow(bool show) {
 	if (!g_ready) return;
 	if (show) {
-		if (!g_lyr.data.found) { showToast("No lyrics found for this song"); return; }
+		if (!g_lyr.data.found) {
+			if (player::configInt("online_lyrics", 0) && player::hasTracks()) { // the lookup starts on the next frame
+				g_lyr.wanted = true;
+				return;
+			}
+			showToast("No lyrics found for this song (the menu's Online lyrics switch can look them up)");
+			return;
+		}
 		g_lyr.wanted = true;
 		showToast(g_lyr.data.timed ? "Lyrics on" : "Lyrics - Up / Down to scroll, B to close");
 	}
@@ -2053,6 +2627,16 @@ void lyricsShow(bool show) {
 	}
 }
 int autoCycleSeconds() { return g_autoSecs; }
+void bindShaders(const std::vector<std::string>* list, const int* current) { g_shList = list; g_shCur = current; }
+bool takeShaderRequest(std::string& path, bool& preview) {
+	if (g_shaderRequest.empty()) return false;
+	path = g_shaderRequest;
+	preview = g_shaderRequestPreview;
+	g_shaderRequest.clear();
+	g_shaderRequestPreview = false;
+	return true;
+}
+bool shaderPreviewActive() { return g_prev.active; }
 void toast(const std::string& text) { if (g_ready) showToast(text); }
 
 bool init(int w, int h) {
@@ -2170,9 +2754,13 @@ Result update(const Input& in) {
 	else g_hudTimer = fmaxf(0.0f, g_hudTimer - dt);
 	if (player::trackChangeCounter() != g_lastTrackChange) {
 		g_lastTrackChange = player::trackChangeCounter();
-		g_hudTimer = HUD_SECONDS;
+		if (player::configInt("hud_on_track", 1)) g_hudTimer = HUD_SECONDS; // (Settings: "Show player when a new track starts")
 	}
 	g_toastTimer = fmaxf(0.0f, g_toastTimer - dt);
+	if (g_eqSaveDelay > 0.0f) { // the equalizer was changed: write config.ini once things have settled
+		g_eqSaveDelay -= dt;
+		if (g_eqSaveDelay <= 0.0f) { g_eqSaveDelay = 0.0f; player::setConfigString("eq_gains", g_eqGainsText, true); }
+	}
 
 	// ---- sleep timer
 	{
@@ -2201,7 +2789,7 @@ Result update(const Input& in) {
 		if (g_lib.open && !g_lib.stack.empty()) { // keep the "minutes left" text on the home page up to date
 			static std::string lastLabel;
 			const std::string now = sleepLabel();
-			if (now != lastLabel) { lastLabel = now; g_lib.stack[0].dirty = true; }
+			if (now != lastLabel) { lastLabel = now; settingsChanged(); } // also redraws the Settings page
 		}
 	}
 
@@ -2222,7 +2810,23 @@ Result update(const Input& in) {
 			else if (near(LIB_W - 44, 50)) g_touchTarget = T_CLOSE;
 			else if (near(LIB_W - 108, 50)) g_touchTarget = T_HOME;
 			else if (near(LIB_W - 172, 50)) g_touchTarget = T_MENU;
-			else if (y >= listTop() && y < listBottom()) g_touchTarget = T_LIST;
+			else if (y >= listTop() && y < listBottom()) {
+				g_touchTarget = T_LIST;
+				// a finger on an equalizer slider sets that band at once and keeps dragging it, instead of scrolling the list
+				View& ev = cur();
+				if (ev.kind == PG_EQUALIZER) {
+					const int idx = (int)((y - listTop() + ev.scrollDisp) / ROW_H);
+					if (idx >= 0 && idx < (int)ev.rows.size()) {
+						const RowKind rk = ev.rows[idx].kind;
+						if (rk >= R_EQ_BAND0 && rk < (RowKind)(R_EQ_BAND0 + equalizer::BAND_COUNT) && x >= EQ_TRACK_X0 - 22.0f && x <= EQ_TRACK_X1 + 22.0f) {
+							g_touchTarget = T_EQSLIDER;
+							g_eqBand = rk - R_EQ_BAND0;
+							ev.sel = idx;
+							eqSetFromX(g_eqBand, x);
+						}
+					}
+				}
+			}
 		}
 		else if (g_info.open) {
 			g_touchOwned = true;
@@ -2243,6 +2847,7 @@ Result update(const Input& in) {
 		g_touchLY = in.touchY;
 		if (fabsf(in.touchX - g_touchSX) > 14 || fabsf(in.touchY - g_touchSY) > 14) g_touchMoved = true;
 		if (g_lib.open) {
+			if (g_touchTarget == T_EQSLIDER && g_eqBand >= 0) eqSetFromX(g_eqBand, in.touchX); // follow the finger
 			if (g_touchTarget == T_LIST && g_touchMoved) {
 				View& cv = cur();
 				cv.scroll = startScroll + (g_touchSY - in.touchY);
@@ -2262,7 +2867,12 @@ Result update(const Input& in) {
 			if (!g_touchMoved) {
 				if (g_touchTarget == T_LIST) {
 					const int idx = (int)((g_touchSY - listTop() + cur().scrollDisp) / ROW_H);
-					if (idx >= 0 && idx < (int)cur().rows.size()) { cur().sel = idx; libActivate(idx); }
+					if (idx >= 0 && idx < (int)cur().rows.size()) {
+						cur().sel = idx;
+						const RowKind rk = cur().rows[idx].kind;
+						const bool eqBand = cur().kind == PG_EQUALIZER && rk >= R_EQ_BAND0 && rk < (RowKind)(R_EQ_BAND0 + equalizer::BAND_COUNT);
+						if (!eqBand || g_touchSX >= EQ_VALUE_X) libActivate(idx); // a tap on a band's name only selects it; on its value it resets it to 0 dB
+					}
 				}
 				else if (g_touchTarget == T_CLOSE || g_touchTarget == T_OUTSIDE) libClose();
 				else if (g_touchTarget == T_HOME) libJumpMusicFolder();
@@ -2286,6 +2896,33 @@ Result update(const Input& in) {
 	const uint32_t d = in.down, h = in.held;
 	if (g_lib.open) {
 		res.consumedButtons = ~0u;
+
+		// ---- Equalizer page: Left/Right nudge the selected band (or change the preset). This runs FIRST so its pressed event is not
+		//      swallowed by the Up/Down handler below, and it uses its own repeaters so hold-to-repeat works.
+		bool eqConsumedLeftRight = false;
+		if (!g_lib.stack.empty() && g_lib.mode == M_MENU && g_lib.stack.back().kind == PG_EQUALIZER) {
+			View& v = g_lib.stack.back();
+			if (v.sel >= 0 && v.sel < (int)v.rows.size()) {
+				const RowKind rk = v.rows[v.sel].kind;
+				if (rk >= R_EQ_BAND0 && rk < (RowKind)(R_EQ_BAND0 + equalizer::BAND_COUNT)) {
+					eqConsumedLeftRight = true;
+					int delta = 0;
+					if (g_eqLeft.fire(d & BTN_LEFT,  h & BTN_LEFT,  dt, 0.35f, 0.06f)) delta = -1;
+					if (g_eqRight.fire(d & BTN_RIGHT, h & BTN_RIGHT, dt, 0.35f, 0.06f)) delta = +1;
+					if (delta != 0) {
+						const int b = rk - R_EQ_BAND0;
+						equalizer::setGain(b, equalizer::gain(b) + delta);
+						eqAfterChange();
+					}
+				}
+				else if (rk == R_EQ_PRESET) { // Left / Right step through the presets
+					eqConsumedLeftRight = true;
+					if (g_eqLeft.fire(d & BTN_LEFT,  h & BTN_LEFT,  dt, 0.5f, 0.3f)) eqCyclePreset(-1);
+					if (g_eqRight.fire(d & BTN_RIGHT, h & BTN_RIGHT, dt, 0.5f, 0.3f)) eqCyclePreset(+1);
+				}
+			}
+		}
+
 		if (g_repUp.fire(d & BTN_UP, h & BTN_UP, dt)) libMove(-1);
 		if (g_repDown.fire(d & BTN_DOWN, h & BTN_DOWN, dt)) libMove(+1);
 		if (g_repPgDown.fire(d & BTN_LS_RIGHT, h & BTN_LS_RIGHT, dt, 0.4f, 0.14f)) libMove(+LIB_PAGE_ROWS);
@@ -2304,8 +2941,8 @@ Result update(const Input& in) {
 		if (d & BTN_L3) libQueueSelected(false);
 		if (d & BTN_A) libActivate(cur().sel);
 		if (d & BTN_B) libBack(true);
-		if (d & BTN_LEFT) libBack(false);
-		if ((d & BTN_RIGHT) && cur().sel < (int)cur().rows.size() && rowOpensSomething(cur().rows[cur().sel].kind)) libActivate(cur().sel);
+		if ((d & BTN_LEFT) && !eqConsumedLeftRight) libBack(false);
+		if ((d & BTN_RIGHT) && !eqConsumedLeftRight && cur().sel < (int)cur().rows.size() && rowOpensSomething(cur().rows[cur().sel].kind)) libActivate(cur().sel);
 		if (d & BTN_X) libPlaySelected();
 		if (d & BTN_Y) libClose();
 		if (d & BTN_L) libShowMenu();
@@ -2353,8 +2990,78 @@ Result update(const Input& in) {
 		if (player::isLoading()) g_hudTimer = fmaxf(g_hudTimer, 1.5f); // keep the "Downloading" note on screen
 	}
 
+	// ---- Shaders page: the highlighted shader plays as a preview; the one that was showing returns when the page is left
+	{
+		const bool onPage = g_lib.open && g_lib.mode == M_MENU && !g_lib.stack.empty() && g_lib.stack.back().kind == PG_SHADERS;
+		if (onPage) {
+			View& pv = g_lib.stack.back();
+			if (!g_prev.active) {
+				g_prev = ShaderPreview();
+				g_prev.active = true;
+				if (g_shList && g_shCur && *g_shCur >= 0 && *g_shCur < (int)g_shList->size()) g_prev.origin = (*g_shList)[*g_shCur];
+				g_prev.lastAsked = g_prev.origin;
+				g_prev.lastSel = pv.sel;
+			}
+			if (pv.sel != g_prev.lastSel) { g_prev.lastSel = pv.sel; g_prev.timer = 0.30f; } // wait until the selection rests, so scrolling does not load a shader at every step
+			if (g_prev.timer > 0.0f) {
+				g_prev.timer -= dt;
+				if (g_prev.timer <= 0.0f && pv.sel >= 0 && pv.sel < (int)pv.rows.size() && pv.rows[pv.sel].kind == R_SHADER) {
+					const std::string& p = pv.rows[pv.sel].path;
+					if (p != g_prev.lastAsked) { g_prev.lastAsked = p; g_shaderRequest = p; g_shaderRequestPreview = true; }
+				}
+			}
+		}
+		else if (g_prev.active) { // the page was left
+			if (!g_prev.keep && !g_prev.origin.empty() && g_prev.lastAsked != g_prev.origin) { g_shaderRequest = g_prev.origin; g_shaderRequestPreview = true; } // put the old one back
+			g_prev = ShaderPreview();
+		}
+	}
+
+	// ---- USB drives: connected / removed
+	{
+		static uint32_t lastStamp = 0;
+		static size_t lastCount = 0;
+		const uint32_t stamp = usbdrive::changeCounter();
+		if (stamp != lastStamp) {
+			lastStamp = stamp;
+			const std::vector<usbdrive::Drive> now = usbdrive::drives();
+			if (now.size() > lastCount) showToast("USB drive connected: " + now.back().name);
+			else if (now.size() < lastCount) showToast("USB drive removed");
+			lastCount = now.size();
+			if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; // the menu page shows the drive name
+			if (g_lib.mode == M_MENU && !g_lib.stack.empty() && g_lib.stack.back().kind == PG_USB) { // redraw the USB page
+				View& uv = g_lib.stack.back();
+				const int sel = uv.sel;
+				uv = makeUsbView();
+				uv.sel = std::min(std::max(sel, 0), (int)uv.rows.size() - 1);
+				clampScroll(uv);
+				uv.scrollDisp = uv.scroll;
+			}
+			if (g_lib.mode == M_FOLDERS && usbdrive::isUsbPath(g_lib.dir) && !usbdrive::isMounted(g_lib.dir)) libShowMenu(); // browsing a drive that is gone
+		}
+	}
+
 	// ---- lyrics
 	lyricsRefresh();
+	if (g_lyr.wanted && !g_lyr.data.found && !g_lyr.forPath.empty() && g_lyr.onlineFor != g_lyr.forPath &&
+		player::configInt("online_lyrics", 0) && player::hasTracks() && !player::isLoading()) {
+		g_lyr.onlineFor = g_lyr.forPath; // one lookup per song
+		lrclib::request(g_lyr.forPath, player::duration());
+		showToast("Searching for lyrics online...");
+	}
+	{
+		lrclib::Result lr;
+		if (lrclib::poll(lr) && lr.path == g_lyr.forPath && !g_lyr.data.found) {
+			lyrics::Lyrics got;
+			if (lr.found && lyrics::fromText(lr.text, got, "lrclib.net")) {
+				g_lyr.data = got;
+				g_lyr.linePos = 0.0f;
+				g_lyr.scroll = 0.0f;
+				showToast(got.timed ? "Lyrics found online" : "Lyrics found online (without timing, so shown as a page)");
+			}
+			else showToast(lr.found ? "The lyrics found online could not be read" : (lr.error.empty() ? "No lyrics found online" : lr.error));
+		}
+	}
 	{
 		const bool timedShown = lyricsTimedVisible(), pageShown = lyricsPageVisible();
 		g_lyr.alpha += (((timedShown || pageShown) ? 1.0f : 0.0f) - g_lyr.alpha) * fminf(1.0f, dt * 8.0f);
@@ -2561,12 +3268,47 @@ void drawLibrary() {
 		case R_NETDIR: ic = IC_FOLDER; iconCol = folderYellow; break;
 		case R_NETSETTINGS: ic = IC_VIZ; iconCol = C_ACCENT; break;
 		case R_NETFIELD: ic = IC_VIZ; iconCol = C_DIM; break;
+		case R_FTPSETTINGS: ic = IC_FOLDER; iconCol = C_ACCENT; break;
+		case R_FTPFIELD: ic = IC_VIZ; iconCol = C_DIM; break;
 		case R_NETCONNECT: ic = IC_PLAY; iconCol = C_ACCENT; textCol = C_ACCENT; break;
+		case R_HOME_USB: ic = IC_FOLDER; iconCol = C_ACCENT; break;
+		case R_USBDRIVE: ic = IC_FOLDER; iconCol = folderYellow; break;
+		case R_USBEJECT: ic = IC_CLOSE; iconCol = textCol = C_DIM; break;
 		case R_NETKEEP: ic = IC_STAR; iconCol = smbnet::keepCache() ? C_ACCENT : C_DIM; break;
 		case R_HOME_ALL: ic = IC_NOTE; iconCol = C_ACCENT; break;
 		case R_HOME_AUTO: ic = IC_VIZ; iconCol = g_autoSecs ? C_ACCENT : C_DIM; break;
+		case R_HOME_SEARCH: ic = IC_NOTE; iconCol = C_ACCENT; break;
+		case R_HOME_HUDTRACK: ic = IC_VIZ; iconCol = player::configInt("hud_on_track", 1) ? C_ACCENT : C_DIM; break;
+		case R_HOME_SHFADE: ic = IC_VIZ; iconCol = player::configInt("shader_fade", 1) ? C_ACCENT : C_DIM; break;
+		case R_HOME_SHTOAST: ic = IC_VIZ; iconCol = player::configInt("shader_toast", 1) ? C_ACCENT : C_DIM; break;
+		case R_HOME_SETTINGS: ic = IC_VIZ; iconCol = C_ACCENT; break;
+		case R_HOME_ONLINELYR: ic = IC_NOTE; iconCol = player::configInt("online_lyrics", 0) ? C_ACCENT : C_DIM; break;
+		case R_SEARCHAGAIN: ic = IC_NOTE; iconCol = textCol = C_ACCENT; break;
+		case R_HOME_SHADERS: ic = IC_STAR; iconCol = C_ACCENT; break;
+		case R_HOME_SHORDER: ic = IC_SHUFFLE; iconCol = shaderpick::order() == shaderpick::ORDER_RANDOM ? C_ACCENT : C_DIM; break;
+		case R_HOME_SHSCOPE: ic = IC_STAR; iconCol = shaderpick::scope() == shaderpick::SCOPE_FAVOURITES ? C_ACCENT : C_DIM; break;
+		case R_SHADER: {
+			const bool fav = shaderpick::isFavourite(r.path);
+			ic = fav ? IC_STAR : IC_VIZ;
+			iconCol = fav ? C_ACCENT : C_DIM;
+			if (g_shList && g_shCur && *g_shCur >= 0 && *g_shCur < (int)g_shList->size() && (*g_shList)[*g_shCur] == r.path) textCol = C_ACCENT; // the one showing now
+			break;
+		}
 		case R_HOME_SLEEPACT: ic = IC_CLOSE; iconCol = C_DIM; break;
 		case R_HOME_SLEEP: ic = IC_PAUSE; iconCol = player::sleepActive() ? C_ACCENT : C_DIM; break;
+				case R_HOME_EQ: case R_EQ_PRESET:
+			ic = IC_EQ;
+			iconCol = equalizer::bypass() ? C_DIM : C_ACCENT;
+			break;
+		case R_EQ_BYPASS:
+			ic = IC_EQ;
+			iconCol = textCol = equalizer::bypass() ? C_DIM : C_ACCENT;
+			break;
+		case R_EQ_BAND0: case R_EQ_BAND1: case R_EQ_BAND2: case R_EQ_BAND3: case R_EQ_BAND4:
+		case R_EQ_BAND5: case R_EQ_BAND6: case R_EQ_BAND7: case R_EQ_BAND8: case R_EQ_BAND9:
+			ic = IC_EQ;
+			iconCol = (equalizer::gain(r.ref) == 0) ? C_DIM : C_ACCENT;
+			break;
 		case R_HOME_RESUME: ic = IC_PLAY; iconCol = C_DIM; break;
 		case R_HOME_RESCAN: ic = IC_REPEAT; iconCol = C_DIM; textCol = C_DIM; break;
 		}
@@ -2578,7 +3320,18 @@ void drawLibrary() {
 			subW = fminf(textWidth(SZ_SMALL, r.sub), 230.0f);
 			drawText(SZ_SMALL, px + LIB_W - 40, y + (ROW_H - g_fontH[SZ_SMALL]) * 0.5f, r.sub, C_DIM, 230, RIGHT);
 		}
-		drawText(SZ_NORMAL, px + 84, y + (ROW_H - g_fontH[SZ_NORMAL]) * 0.5f, r.label, textCol, LIB_W - 84 - 40 - (subW > 0 ? subW + 18 : 0));
+		const bool eqBandRow = r.kind >= R_EQ_BAND0 && r.kind < (RowKind)(R_EQ_BAND0 + equalizer::BAND_COUNT);
+		drawText(SZ_NORMAL, px + 84, y + (ROW_H - g_fontH[SZ_NORMAL]) * 0.5f, r.label, textCol, eqBandRow ? 100.0f : (LIB_W - 84 - 40 - (subW > 0 ? subW + 18 : 0)));
+		if (eqBandRow) { // the band's slider: a track with a mark at 0 dB, a coloured bar to the knob, and the knob
+			const float x0 = px + EQ_TRACK_X0, x1 = px + EQ_TRACK_X1, cy = y + ROW_H * 0.5f;
+			const int g = equalizer::gain(r.ref);
+			const float frac = (float)(g - equalizer::MIN_DB) / (float)(equalizer::MAX_DB - equalizer::MIN_DB);
+			const float kx = x0 + frac * (x1 - x0), zx = x0 + 0.5f * (x1 - x0);
+			rrect(x0, cy - 3.0f, x1 - x0, 6.0f, 3.0f, withA(C_WHITE, 0.16f));
+			rrect(zx - 1.0f, cy - 9.0f, 2.0f, 18.0f, 1.0f, withA(C_WHITE, 0.40f));
+			if (g != 0) rrect(fminf(zx, kx), cy - 3.0f, fabsf(kx - zx), 6.0f, 3.0f, g > 0 ? C_ACCENT : Color{ 0.45f, 0.72f, 1.0f, 1.0f });
+			circle(kx, cy, sel ? 12.0f : 10.0f, g == 0 ? withA(C_WHITE, 0.85f) : (g > 0 ? C_ACCENT : Color{ 0.45f, 0.72f, 1.0f, 1.0f }));
+		}
 	}
 	if (v.empty) {
 		const float y = listTop() + v.rows.size() * ROW_H - v.scrollDisp + 16;
@@ -2800,15 +3553,70 @@ void drawInfo() {
 	}
 }
 
+// Splits text into lines that fit in maxW. A "\n" in the text always starts a new line; long words are broken if they alone are too wide.
+std::vector<std::string> wrapText(int sz, const std::string& text, float maxW) {
+	std::vector<std::string> lines;
+	size_t pos = 0;
+	while (pos <= text.size()) {
+		size_t nl = text.find('\n', pos);
+		if (nl == std::string::npos) nl = text.size();
+		const std::string para = text.substr(pos, nl - pos);
+		pos = nl + 1;
+
+		std::string line;
+		size_t wp = 0;
+		while (wp <= para.size()) {
+			size_t sp = para.find(' ', wp);
+			if (sp == std::string::npos) sp = para.size();
+			std::string word = para.substr(wp, sp - wp);
+			wp = sp + 1;
+			if (word.empty() && sp != para.size()) continue;
+
+			std::string trial = line.empty() ? word : line + " " + word;
+			if (textWidth(sz, trial) <= maxW) { line = trial; continue; }
+			if (!line.empty()) { lines.push_back(line); line.clear(); }
+			// the word on its own: break it where it stops fitting (never inside a UTF-8 character)
+			while (!word.empty() && textWidth(sz, word) > maxW) {
+				size_t cut = 0;
+				while (cut < word.size()) {
+					size_t next = cut + 1;
+					while (next < word.size() && ((unsigned char)word[next] & 0xC0) == 0x80) next++;
+					if (textWidth(sz, word.substr(0, next)) > maxW) break;
+					cut = next;
+				}
+				if (cut == 0) cut = 1; // a single character wider than the box: show it anyway
+				lines.push_back(word.substr(0, cut));
+				word = word.substr(cut);
+			}
+			line = word;
+		}
+		lines.push_back(line);
+	}
+	if (lines.empty()) lines.push_back(std::string());
+	return lines;
+}
+
 void drawToast() {
 	if (g_toastTimer <= 0.0f) return;
 	g_alpha = fminf(1.0f, g_toastTimer / 0.4f);
-	const float maxW = 900.0f;
-	const float tw = fminf(maxW, textWidth(SZ_NORMAL, g_toast));
 	const float x = g_lib.open ? LIB_W + 30.0f : 36.0f;
-	rrect(x, 30, tw + 56, 48, 24, { 0.02f, 0.04f, 0.08f, 0.88f });
-	circle(x + 24, 54, 5, C_ACCENT);
-	drawText(SZ_NORMAL, x + 42, 30 + (48 - g_fontH[SZ_NORMAL]) * 0.5f, g_toast, C_WHITE, maxW);
+	const float boxPad = 56.0f;                                  // dot on the left + space on the right
+	float maxW = fminf(900.0f, (float)g_w - x - 36.0f - boxPad);  // what is left of the screen
+	maxW = fmaxf(maxW, 200.0f);
+	std::vector<std::string> lines = wrapText(SZ_NORMAL, g_toast, maxW);
+	const size_t MAX_LINES = 4;
+	if (lines.size() > MAX_LINES) lines.resize(MAX_LINES);       // (the last line is cut short with "..." by drawText)
+
+	float tw = 0.0f;
+	for (const std::string& l : lines) tw = fmaxf(tw, fminf(maxW, textWidth(SZ_NORMAL, l)));
+	const float lineH = g_fontH[SZ_NORMAL] + 6.0f;
+	const float h = lines.size() == 1 ? 48.0f : 20.0f + lineH * (float)lines.size();
+	rrect(x, 30, tw + boxPad, h, lines.size() == 1 ? 24.0f : 20.0f, { 0.02f, 0.04f, 0.08f, 0.88f });
+	circle(x + 24, 30 + (lines.size() == 1 ? 24.0f : 10.0f + lineH * 0.5f), 5, C_ACCENT);
+	for (size_t i = 0; i < lines.size(); i++) {
+		const float y = lines.size() == 1 ? 30 + (48 - g_fontH[SZ_NORMAL]) * 0.5f : 30 + 10.0f + lineH * (float)i + 3.0f;
+		drawText(SZ_NORMAL, x + 42, y, lines[i], C_WHITE, maxW);
+	}
 }
 
 } // namespace

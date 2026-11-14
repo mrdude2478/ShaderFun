@@ -31,9 +31,9 @@ void main() {
 
     // slash blades
     float blades = 0.0;
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 3; i++) {
         float fi = float(i);
-        float ang = a * (3.0 + fi * 0.3) + t * (2.0 + fi * 0.4) + bass * 3.0;
+        float ang = a * (3.0 + fi) + t * (0.5 + (fi*3.14) * 0.4) + bass * 3.0;
         float slash = abs(sin(ang));
         slash = pow(slash, 12.0 + high * 20.0);
         float fade = exp(-r * (1.2 + fi * 0.15));

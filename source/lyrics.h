@@ -28,6 +28,9 @@ struct Lyrics {
 // Looks for "<song>.lrc" first, then lyrics inside the file's own tags. Returns true if lyrics were found.
 bool load(const std::string& trackPath, Lyrics& out);
 
+// Reads lyrics from text you already have (for example lyrics fetched online). 'source' is a label such as "lrclib.net".
+bool fromText(const std::string& text, Lyrics& out, const char* source);
+
 // Index of the line that should be showing at 'seconds' (-1 before the first line, or if not timed).
 int lineAt(const Lyrics& l, double seconds);
 

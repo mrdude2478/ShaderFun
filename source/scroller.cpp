@@ -48,13 +48,7 @@ const float TOUCH_SWELL = 1.2f;            // extra amplitude next to the finger
 const float TOUCH_MAGNET = 0.35f;          // 0..1, how strongly letters are pulled towards the finger
 
 const char* DEFAULT_TEXT =
-	"OldSchool rainbow scrolling effect for the nintendo switch created by"
-	"$               *** MrDude ***       #"
-	"   Touch the screen to play with the letters - drag to move the text        #"
-	"   Press B to hide or show this scroller, and put your own message in"
-	" sdmc:/switch/shaderfun/scroller.txt   "
-	"                      $"
-	"Normal speed has resumed now so carry on with the messages";
+	"                     $ *** Created by ***      #    *** MrDude ***      #";
 
 // ---------------------------------------------------------------- state
 struct Glyph {

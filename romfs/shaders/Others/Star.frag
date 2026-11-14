@@ -1,7 +1,25 @@
 // CC0: Starry planes
 //  Revisited ye olde "plane-marcher".
 //  A simple result that I think turned out pretty nice
+
+//!model on
+//!scroller off
+//!model "star_5point" "star.jpg"
+// "metallic","chrome","neon","matte"
+//!material neon
+//!model_ground off
+//!model_audio off
+//!model_zoom 6.5
+//!model_rotate 1.0 
+//!model_rotate_x 0.05    // X – vertical, shows top and bottom
+//!model_rotate_z 0.05    // Z – roll
+//!model_pos 0.0 -0.0 0.0
+//!model_yaw 0.5  
+//!model_pitch 0.5   
+//!model_auto on
+
 precision mediump float;
+
 
 uniform vec3  iResolution;
 uniform float iTime;

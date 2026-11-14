@@ -1,5 +1,6 @@
 #include "lyrics.h"
 #include "tags.h"
+#include "lrclib.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -225,8 +226,22 @@ bool load(const std::string& trackPath, Lyrics& out) {
 		parseText(toUtf8(t.lyrics), out);
 		if (out.found) { out.source = "embedded tag"; return true; }
 	}
+	// 3. lyrics found online earlier (kept in the lyrics cache folder)
+	std::string cached;
+	if (lrclib::cachedForSong(trackPath, cached)) {
+		parseText(toUtf8(cached), out);
+		if (out.found) { out.source = "lrclib.net (saved)"; return true; }
+	}
 	out = Lyrics();
 	return false;
+}
+
+bool fromText(const std::string& text, Lyrics& out, const char* source) {
+	out = Lyrics();
+	parseText(toUtf8(text), out);
+	if (!out.found) { out = Lyrics(); return false; }
+	out.source = source ? source : "";
+	return true;
 }
 
 int lineAt(const Lyrics& l, double seconds) {

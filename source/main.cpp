@@ -29,6 +29,7 @@ Hold ZR + Right Stick X: Cycle material (Metallic/Chrome/Neon/Matte)
 #include <vector>
 #include <fstream>
 #include <sstream>
+#include <map>
 #include <dirent.h>
 #include <cmath>
 #include <sys/socket.h>
@@ -45,6 +46,10 @@ Hold ZR + Right Stick X: Cycle material (Metallic/Chrome/Neon/Matte)
 #include "scroller.h"
 #include "player.h"
 #include "smbnet.h"
+#include "lrclib.h"
+#include "equalizer.h"
+#include "usbdrive.h"
+#include "shaderpick.h"
 #include "ui.h"
 #include "library.h"
 #include "model3d.h"
@@ -304,7 +309,7 @@ static void cleanupImageTextures() {
 //   //!model_yaw 0  //!model_pitch 0  //!model_auto on
 //   //!model_audio off  //!model_ground off
 // Without a directive, iChannel2 shows the image selected with the X button.
-static void applyChannelDirectives(const std::string& fragSource, const std::string& shaderPath = "") {
+static void applyChannelDirectives(const std::string& fragSource, const std::string& shaderPath = "", bool loadImages = true) {
 	bool set[NUM_IMAGE_CHANNELS] = { false, false };
 	std::istringstream in(fragSource);
 	std::string line;
@@ -341,11 +346,11 @@ static void applyChannelDirectives(const std::string& fragSource, const std::str
 				full = "sdmc:/switch/shaderfun/images/" + name;
 				if (stat(full.c_str(), &ist) != 0) full = "romfs:/images/" + name;
 			}
-			loadImageTexture(full, g_img[c]);
+			if (loadImages) loadImageTexture(full, g_img[c]); // (a smooth shader change loads the images earlier, see prepareNextImages)
 			set[c] = true;
 		}
 	}
-	if (!set[0] && !g_imageFiles.empty()) {
+	if (loadImages && !set[0] && !g_imageFiles.empty()) {
 		loadImageTexture(g_imageFiles[g_imageIndex % g_imageFiles.size()], g_img[0]);
 	}
 
@@ -523,13 +528,17 @@ static const bool USE_HANN_WINDOW = true;    // reduces spectral leakage (gain-c
 // Effect callback to capture PCM
 void audioEffectCallback(int chan, void* stream, int len, void* udata) {
 	int16_t* samples = (int16_t*)stream;
-	int count = len / 2; // 16-bit samples
+	const int sampleCount = len / 2;   // 16-bit samples
+	const int frames = sampleCount / 2;
+	// FFT first: the visuals react to the song as it is, not to what the EQ made of it
 	int w = g_waveWrite;
-	for (int i = 0; i < count; i += 2) { // left channel
+	for (int i = 0; i < sampleCount; i += 2) { // left channel
 		audioWaveform[w] = samples[i] / 32768.0f;
 		w = (w + 1) % FFT_SIZE;
 	}
 	g_waveWrite = w;
+	// then the EQ, in place, on the final mixed buffer (post-mix effect)
+	equalizer::process(samples, frames);
 }
 
 // Compute FFT from waveform
@@ -582,34 +591,48 @@ void uploadAudioTextures() {
 
 // Initialize audio system
 bool initAudio() {
-	// Initialize SDL_mixer
 	if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 1024) < 0) {
 		printf("SDL_mixer init failed: %s\n", Mix_GetError());
 		return false;
 	}
 
-	// Initialize KissFFT
+	// 10-band equalizer: design the filters for the rate the mixer actually uses
+	{
+		int freq = 0, channels = 0;
+		Uint16 format = 0;
+		if (Mix_QuerySpec(&freq, &format, &channels) && freq > 0) { /* freq is what the callback receives */ }
+		else freq = 44100;
+		equalizer::init(freq);
+		// (the saved on / off and band settings are restored by restoreEqualizerSettings(), once config.ini has been read)
+	}
+
 	fftCfg = kiss_fft_alloc(FFT_SIZE, 0, NULL, NULL);
-
-	// Initialize audio buffers
-	for (int i = 0; i < FFT_SIZE; i++) {
-		audioWaveform[i] = 0.0f;
-	}
-	for (int i = 0; i < FFT_SIZE / 2; i++) {
-		audioSpectrum[i] = 0.0f;
-	}
-
+	for (int i = 0; i < FFT_SIZE; i++) audioWaveform[i] = 0.0f;
+	for (int i = 0; i < FFT_SIZE / 2; i++) audioSpectrum[i] = 0.0f;
 	return true;
+}
+
+// Restores what was saved in config.ini: "eq_gains" holds one number per band, like "0,2,4,...", and "eq_bypass" is on / off.
+// Must run after player::init() has read config.ini (initAudio() runs earlier, when the settings are not loaded yet).
+static void restoreEqualizerSettings() {
+	const std::string saved = player::configString("eq_gains", "");
+	const char* p = saved.c_str();
+	for (int b = 0; b < equalizer::BAND_COUNT && *p; b++) {
+		char* end = nullptr;
+		const long v = strtol(p, &end, 10);
+		if (end == p) break;
+		equalizer::setGain(b, (int)v);
+		p = end;
+		while (*p == ',' || *p == ' ') p++;
+	}
+	equalizer::setBypass(player::configInt("eq_bypass", 0) != 0);
 }
 
 // Cleanup audio system
 void cleanupAudio() {
+	equalizer::shutdown();
 	Mix_CloseAudio();
-
-	if (fftCfg) {
-		kiss_fft_free(fftCfg);
-		fftCfg = nullptr;
-	}
+	if (fftCfg) { kiss_fft_free(fftCfg); fftCfg = nullptr; }
 }
 
 /*
@@ -752,6 +775,14 @@ void toggle_led(LedState patternType = LED_SOLID) {
 	}
 }
 
+// Is Wi-Fi on and connected to a network? (asks the system's network service, so it also works when Wi-Fi is switched on later)
+static bool g_nifmReady = false;
+static bool wifiConnected() {
+	if (!g_nifmReady) return true; // cannot tell: let the server try anyway
+	u32 ip = 0;
+	return R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) && ip != 0;
+}
+
 bool print_ip_local() {
 	int sock = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sock < 0) {
@@ -841,6 +872,405 @@ static bool updateOperationMode() {
 }
 // === end docked ===
 
+// "Shader: name", with a star in front when it is one of your favourites
+static std::string shaderToastText(const std::string& path) {
+	return std::string("Shader: ") + (shaderpick::isFavourite(path) ? "\xE2\x98\x85 " : "") + player::baseName(path);
+}
+
+// shows the shader name, unless that is switched off in the Settings page
+static void announceShader(const std::string& path) {
+	if (player::configInt("shader_toast", 1)) ui::toast(shaderToastText(path));
+}
+
+// === Smooth shader changes ===
+// While a shader plays, the NEXT and PREVIOUS shaders (what R and L would show) are prepared in the background, one small
+// step at a time: the file and its images, then compile + link, then one hidden warm-up frame. So L / R only swap in an
+// already compiled shader, and the automatic change takes the prepared "next" shader and cross-fades to it over FADE_MS
+// (both shaders are drawn into off-screen images and blended). Switch off with Settings > "Smooth shader changes".
+static const Uint32 PREP_SETTLE_MS = 1500;    // start preparing this long after a shader change
+static const Uint32 FADE_STEP_GAP_MS = 300;   // pause between two preparation steps, so no single frame gets very long
+static const Uint32 FADE_MS = 1000;           // length of the cross-fade
+static const Uint32 PREP_LATE_MS = 5000;      // an automatic change waits at most this long for its prepared shader
+
+// Image textures can be used by the live shader and by prepared ones at the same time, so they are counted.
+static std::map<GLuint, int> g_texRefs;
+static void texCreate(GLuint id) { if (id) g_texRefs[id] = 1; }
+static void texShare(GLuint id) {
+	if (!id) return;
+	if (!g_texRefs.count(id)) g_texRefs[id] = 1; // the holder that had it first
+	g_texRefs[id]++;
+}
+static void texRelease(GLuint id) {
+	if (!id) return;
+	auto it = g_texRefs.find(id);
+	if (it == g_texRefs.end() || --it->second <= 0) {
+		if (it != g_texRefs.end()) g_texRefs.erase(it);
+		glDeleteTextures(1, &id);
+	}
+}
+static void releaseImageSet(ImageTex* set) {
+	for (int c = 0; c < NUM_IMAGE_CHANNELS; c++) { texRelease(set[c].id); set[c] = ImageTex(); }
+}
+
+// A shader that is being prepared (or is ready) in the background
+struct Prep {
+	enum Stage { EMPTY, LOADED, COMPILED, READY };
+	Stage stage = EMPTY;
+	int index = -1;
+	std::string path, source;
+	time_t mtime = 0;
+	ShaderProgram prog;
+	ImageTex img[NUM_IMAGE_CHANNELS]; // its images (a channel can share the texture of the live shader)
+};
+static Prep g_prepNext, g_prepPrev;
+static Uint32 g_prepLastStep = 0;
+
+// The cross-fade itself
+struct Fade {
+	enum Stage { IDLE, FADING };
+	Stage stage = IDLE;
+	std::string path, source;           // the shader we are fading to
+	Uint32 fadeStart = 0;
+	bool directivesApplied = false;
+	ShaderProgram oldProg;              // the shader we are fading away from
+	ImageTex oldImg[NUM_IMAGE_CHANNELS];
+};
+static Fade g_fade;
+
+static GLuint g_fadeFbo[2] = { 0, 0 };
+static GLuint g_fadeTex[2] = { 0, 0 };
+static GLuint g_blendProg = 0;
+static GLint g_blendLocA = -1, g_blendLocB = -1, g_blendLocMix = -1;
+static bool g_fadeResReady = false, g_fadeResFailed = false;
+
+static const char* blendFragmentSrc = R"(
+precision mediump float;
+varying vec2 vUV;
+uniform sampler2D uA;
+uniform sampler2D uB;
+uniform float uMix;
+void main() {
+    gl_FragColor = vec4(mix(texture2D(uA, vUV).rgb, texture2D(uB, vUV).rgb, uMix), 1.0);
+}
+)";
+
+// Two 1280x720 off-screen images and the blend shader, made the first time they are needed.
+// false = not possible on this system: shaders then simply change without preparing or fading.
+static bool ensureFadeResources() {
+	if (g_fadeResReady) return true;
+	if (g_fadeResFailed) return false;
+	g_fadeResFailed = true; // stays so unless everything below works
+
+	std::string err;
+	GLuint vs = compileShader(GL_VERTEX_SHADER, vertexShaderSrc, &err);
+	GLuint fs = vs ? compileShader(GL_FRAGMENT_SHADER, blendFragmentSrc, &err) : 0;
+	GLuint prog = 0;
+	if (vs && fs) {
+		prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glBindAttribLocation(prog, 0, "aPos");
+		glLinkProgram(prog);
+		GLint ok = 0;
+		glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (!ok) { glDeleteProgram(prog); prog = 0; }
+	}
+	if (vs) glDeleteShader(vs);
+	if (fs) glDeleteShader(fs);
+	if (!prog) { printf("Fade: blend shader failed (%s), shaders will change without a fade\n", err.c_str()); return false; }
+
+	bool good = true;
+	glGenTextures(2, g_fadeTex);
+	glGenFramebuffers(2, g_fadeFbo);
+	for (int i = 0; i < 2 && good; i++) {
+		glBindTexture(GL_TEXTURE_2D, g_fadeTex[i]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1280, 720, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glBindFramebuffer(GL_FRAMEBUFFER, g_fadeFbo[i]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_fadeTex[i], 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) good = false;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	if (!good) {
+		printf("Fade: off-screen buffers are not available, shaders will change without a fade\n");
+		glDeleteProgram(prog);
+		glDeleteFramebuffers(2, g_fadeFbo);
+		glDeleteTextures(2, g_fadeTex);
+		return false;
+	}
+	g_blendProg = prog;
+	g_blendLocA = glGetUniformLocation(prog, "uA");
+	g_blendLocB = glGetUniformLocation(prog, "uB");
+	g_blendLocMix = glGetUniformLocation(prog, "uMix");
+	g_fadeResReady = true;
+	g_fadeResFailed = false;
+	printf("Fade: ready\n");
+	return true;
+}
+
+// Draws one shader over the whole bound framebuffer (the normal frame, or one of the fade buffers).
+static void drawShaderPass(const ShaderProgram& sp, const ImageTex* imgs, float time, float dt, int frame, const float* mouse, GLuint vbo) {
+	glUseProgram(sp.prog);
+	glUniform3f(sp.iResolutionLoc, 1280.0f, 720.0f, 1.0f);
+	glUniform1f(sp.iTimeLoc, time);
+
+	// Optional Shadertoy uniforms (only set if the shader declares them)
+	if (sp.iTimeDeltaLoc != -1) glUniform1f(sp.iTimeDeltaLoc, dt);
+	// NOTE: declare as "uniform int iFrame;" in the shader
+	if (sp.iFrameLoc != -1) glUniform1i(sp.iFrameLoc, frame);
+	if (sp.iMouseLoc != -1) glUniform4f(sp.iMouseLoc, mouse[0], mouse[1], mouse[2], mouse[3]);
+	if (sp.iChannelResolutionLoc != -1) {
+		float res[12] = {
+			(float)FFT_SIZE, 1.0f, 1.0f,
+			(float)(FFT_SIZE / 2), 1.0f, 1.0f,
+			(float)imgs[0].w, (float)imgs[0].h, 1.0f,
+			(float)imgs[1].w, (float)imgs[1].h, 1.0f
+		};
+		glUniform3fv(sp.iChannelResolutionLoc, 4, res);
+	}
+
+	// Bind audio (0,1) and image (2,3) textures to the shader channels
+	const GLuint channelTex[4] = { audioTexWaveform, audioTexSpectrum, imgs[0].id, imgs[1].id };
+	for (int c = 0; c < 4; c++) {
+		if (sp.iChannelLoc[c] != -1) {
+			glActiveTexture(GL_TEXTURE0 + c);
+			glBindTexture(GL_TEXTURE_2D, channelTex[c]);
+			glUniform1i(sp.iChannelLoc[c], c);
+		}
+	}
+
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	// Re-bind the vertex attributes before drawing
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+	glEnableVertexAttribArray(0);
+
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+// The images a shader asks for with //!iChannel2 / //!iChannel3 (or the X-button image), loaded into fresh textures
+// so the shader that is still on screen keeps its own. Channels the new shader does not set keep the live texture.
+static void loadImageFresh(const std::string& path, ImageTex& slot) {
+	for (int c = 0; c < NUM_IMAGE_CHANNELS; c++) {
+		if (g_img[c].id != 0 && g_img[c].path == path) { // already loaded: share it
+			if (slot.id != g_img[c].id) { texRelease(slot.id); slot = g_img[c]; texShare(slot.id); }
+			return;
+		}
+	}
+	ImageTex t;
+	if (loadImageTexture(path, t)) { texRelease(slot.id); slot = t; texCreate(t.id); }
+}
+
+static void prepareNextImages(const std::string& fragSource, ImageTex* out) {
+	bool set[NUM_IMAGE_CHANNELS] = { false, false };
+	std::istringstream in(fragSource);
+	std::string line;
+	int lineNo = 0;
+	while (std::getline(in, line) && lineNo++ < 40) {
+		for (int c = 0; c < NUM_IMAGE_CHANNELS; c++) {
+			const std::string key = "//!iChannel" + std::to_string(c + 2);
+			const size_t p = line.find(key);
+			if (p == std::string::npos) continue;
+			const size_t q1 = line.find('"', p);
+			const size_t q2 = (q1 == std::string::npos) ? std::string::npos : line.find('"', q1 + 1);
+			if (q2 == std::string::npos) continue;
+			const std::string name = line.substr(q1 + 1, q2 - q1 - 1);
+			std::string full = name;
+			if (name.find(':') == std::string::npos) {
+				struct stat ist;
+				full = "sdmc:/switch/shaderfun/images/" + name;
+				if (stat(full.c_str(), &ist) != 0) full = "romfs:/images/" + name;
+			}
+			loadImageFresh(full, out[c]);
+			set[c] = true;
+		}
+	}
+	if (!set[0] && !g_imageFiles.empty()) loadImageFresh(g_imageFiles[g_imageIndex % g_imageFiles.size()], out[0]);
+}
+
+// --- prepared shaders ---
+static void prepFree(Prep& p) {
+	if (p.stage == Prep::EMPTY) return;
+	if (p.prog.prog) glDeleteProgram(p.prog.prog);
+	releaseImageSet(p.img);
+	p = Prep();
+}
+
+// Does one small preparation step for the shader with this index (-1 = none wanted). true = it used this frame's step.
+static bool prepStep(Prep& p, const std::vector<std::string>& files, int wantIndex, Uint32 now, float time, const float* mouse, GLuint vbo, int frame) {
+	if (wantIndex < 0 || wantIndex >= (int)files.size()) { prepFree(p); return false; }
+	if (p.stage != Prep::EMPTY && (p.index != wantIndex || p.path != files[wantIndex])) prepFree(p); // not what is wanted any more
+	switch (p.stage) {
+	case Prep::EMPTY: {
+		p.index = wantIndex;
+		p.path = files[wantIndex];
+		struct stat st;
+		p.mtime = (stat(p.path.c_str(), &st) == 0) ? st.st_mtime : 0;
+		p.source = loadFile(p.path.c_str());
+		for (int c = 0; c < NUM_IMAGE_CHANNELS; c++) { p.img[c] = g_img[c]; texShare(p.img[c].id); } // shared with the live shader until the new one brings its own
+		if (!p.source.empty()) prepareNextImages(p.source, p.img);
+		p.stage = Prep::LOADED;
+		g_prepLastStep = now;
+		return true;
+	}
+	case Prep::LOADED:
+		p.prog = p.source.empty() ? loadShaderProgram(fallbackFragmentShader, p.path + " (empty)", true)
+		                          : loadShaderProgram(p.source.c_str(), p.path); // the slow compile + link
+		if (!p.prog.prog) { prepFree(p); g_prepLastStep = now; return true; }
+		p.stage = Prep::COMPILED;
+		g_prepLastStep = now;
+		return true;
+	case Prep::COMPILED:
+		// one hidden frame, so the driver finishes its work for this shader now and not when it is shown
+		glBindFramebuffer(GL_FRAMEBUFFER, g_fadeFbo[1]);
+		drawShaderPass(p.prog, p.img, time, 0.016f, frame, mouse, vbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glFinish();
+		p.stage = Prep::READY;
+		g_prepLastStep = now;
+		return true;
+	case Prep::READY:
+		return false;
+	}
+	return false;
+}
+
+// Keeps the next and previous shader prepared. Called every frame while smooth changes are on.
+static void prepUpdate(const std::vector<std::string>& files, int currentShader, Uint32 now, float time, const float* mouse, GLuint vbo, int frame) {
+	if (files.size() < 2) { prepFree(g_prepNext); prepFree(g_prepPrev); return; }
+	if (now - g_prepLastStep < FADE_STEP_GAP_MS) return;
+	int wantNext = shaderpick::peekIndex(files, currentShader, +1);
+	int wantPrev = shaderpick::peekIndex(files, currentShader, -1);
+	if (wantNext == currentShader) wantNext = -1;
+	if (wantPrev == currentShader) wantPrev = -1;
+	if (prepStep(g_prepNext, files, wantNext, now, time, mouse, vbo, frame)) return; // (next first: it is also used by the automatic change)
+	prepStep(g_prepPrev, files, wantPrev, now, time, mouse, vbo, frame);
+}
+
+// The prepared shader becomes the live one. false = it is not (or no longer) usable; the caller loads the shader the slow way.
+static bool prepIsUsable(const Prep& p, const std::vector<std::string>& files, int index) {
+	if (p.stage != Prep::READY || p.index != index || index < 0 || index >= (int)files.size() || p.path != files[index]) return false;
+	struct stat st;
+	const time_t mt = (stat(p.path.c_str(), &st) == 0) ? st.st_mtime : 0;
+	return mt == p.mtime; // the file was not changed meanwhile (for example uploaded again by FTP)
+}
+
+static bool prepAdopt(Prep& p, const std::vector<std::string>& files, int index, ShaderProgram& shader) {
+	if (!prepIsUsable(p, files, index)) return false;
+	glDeleteProgram(shader.prog);
+	ImageTex old[NUM_IMAGE_CHANNELS];
+	for (int c = 0; c < NUM_IMAGE_CHANNELS; c++) { old[c] = g_img[c]; g_img[c] = p.img[c]; }
+	shader = p.prog;
+	g_shaderMtime = p.mtime;
+	releaseImageSet(old);
+	applyChannelDirectives(p.source, p.path, false); // scroller / model / audio flags (the images are already in place)
+	p = Prep(); // everything it held now belongs to the live shader
+	return true;
+}
+
+// Throws away a fade in progress (manual switches, list changes...): the live shader stays.
+static void fadeCancel() {
+	Fade& f = g_fade;
+	if (f.stage == Fade::IDLE) return;
+	if (f.oldProg.prog) glDeleteProgram(f.oldProg.prog);
+	releaseImageSet(f.oldImg);
+	f.oldProg = ShaderProgram();
+	f.source.clear();
+	f.path.clear();
+	f.directivesApplied = false;
+	f.stage = Fade::IDLE;
+}
+
+// halfway through the fade the new shader's scroller / model / audio settings take over
+static void fadeApplyDirectives() {
+	g_fade.directivesApplied = true;
+	applyChannelDirectives(g_fade.source, g_fade.path, false); // (its images were loaded earlier)
+}
+
+static void fadeFinish() {
+	Fade& f = g_fade;
+	if (f.stage != Fade::FADING) return;
+	if (!f.directivesApplied) fadeApplyDirectives();
+	if (f.oldProg.prog) glDeleteProgram(f.oldProg.prog);
+	releaseImageSet(f.oldImg);
+	f.oldProg = ShaderProgram();
+	f.source.clear();
+	f.path.clear();
+	f.stage = Fade::IDLE;
+}
+
+// One frame of the cross-fade: old shader and new shader each into their own image, then blend them onto the screen.
+static void drawFadeFrame(float p, const ShaderProgram& live, float time, float dt, int frame, const float* mouse, GLuint vbo) {
+	glBindFramebuffer(GL_FRAMEBUFFER, g_fadeFbo[0]);
+	drawShaderPass(g_fade.oldProg, g_fade.oldImg, time, dt, frame, mouse, vbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_fadeFbo[1]);
+	drawShaderPass(live, g_img, time, dt, frame, mouse, vbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	const float s = p * p * (3.0f - 2.0f * p); // smoothstep
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glUseProgram(g_blendProg);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, g_fadeTex[0]);
+	glUniform1i(g_blendLocA, 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, g_fadeTex[1]);
+	glUniform1i(g_blendLocB, 1);
+	glUniform1f(g_blendLocMix, s);
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+	glEnableVertexAttribArray(0);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	// let go of the fade images so they are never both sampled and drawn into
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// The automatic change, when it is due: fade to the prepared "next" shader (instead of loading it the slow way).
+static void fadeAutoStep(const std::vector<std::string>& files, int& currentShader, ShaderProgram& shader, Uint32& lastShaderChange,
+	Uint32 elapsedMs, Uint32 intervalMs) {
+	Fade& f = g_fade;
+	if (f.stage == Fade::FADING || elapsedMs < intervalMs) return;
+	const Uint32 now = SDL_GetTicks();
+	Prep& p = g_prepNext;
+	if (p.stage != Prep::READY && elapsedMs < intervalMs + PREP_LATE_MS) return; // wait for it (it is being prepared)
+
+	const int before = currentShader;
+	const int idx = shaderpick::pickIndex(files, currentShader, +1); // follows "Shader order" and "Shader list"; agrees with the prepared one
+	if (shaderpick::consumeFallbackNotice()) ui::toast("No favourites for this mode yet - using all shaders");
+	if (idx == before) { lastShaderChange = now; return; }
+	currentShader = idx;
+
+	if (!prepIsUsable(p, files, idx)) { // not prepared in time (or the file changed): the slow way, as without smooth changes
+		prepFree(p);
+		glDeleteProgram(shader.prog);
+		shader = loadShaderFromFile(files[idx]);
+		announceShader(files[idx]);
+		lastShaderChange = now;
+		return;
+	}
+
+	// start the fade: the prepared shader becomes the live one, the old one stays until the fade is over
+	f.oldProg = shader;
+	for (int c = 0; c < NUM_IMAGE_CHANNELS; c++) { f.oldImg[c] = g_img[c]; g_img[c] = p.img[c]; }
+	shader = p.prog;
+	g_shaderMtime = p.mtime;
+	f.path = p.path;
+	f.source = p.source;
+	f.directivesApplied = false;
+	f.fadeStart = now;
+	f.stage = Fade::FADING;
+	p = Prep(); // everything it held now belongs to the fade / the live shader
+	lastShaderChange = now;
+	announceShader(f.path);
+}
+
 void rescanShaders(std::vector<std::string>& shaderFiles, int& currentShader) {
 	printf("Rescanning shaders...\n");
 
@@ -893,6 +1323,7 @@ int main(int argc, char* argv[]) {
 	padInitializeDefault(&pad);
 	hidInitializeTouchScreen();
 	hidsysInitialize();
+	g_nifmReady = R_SUCCEEDED(nifmInitialize(NifmServiceType_User));
 
 	bool network_available = false;
 
@@ -906,6 +1337,7 @@ int main(int argc, char* argv[]) {
 
 
 	// Execute appropriate function based on network status
+	bool ftpReady = false; // ftp_init() has run (it is also done on the first Minus press when Wi-Fi was off at launch)
 	if (network_available) {
 		//turn_led_on(); //uncomment to test
 		// Initialize FTP server
@@ -913,6 +1345,7 @@ int main(int argc, char* argv[]) {
 			printf("Failed to initialize FTP server\n");
 		}
 		else {
+			ftpReady = true;
 			printf("FTP server initialized - Press Minus to start/stop\n");
 		}
 	}
@@ -1033,7 +1466,9 @@ int main(int argc, char* argv[]) {
 
 	// Music player core + overlay UI
 	mkdir("sdmc:/switch/shaderfun", 0777); // make sure the config folder exists
+	usbdrive::start(); // USB drives in the dock (needs libusbhsfs); fails quietly when it is not available
 	player::init("sdmc:/switch/shaderfun/config.ini");
+	if (audioInitialized) restoreEqualizerSettings(); // (needs the settings player::init just loaded)
 	library::init("sdmc:/switch/shaderfun/library.idx");
 	library::startScan(player::musicFolder()); // indexes the music folder in the background (cached after the first run)
 	bool plReady = false;
@@ -1068,6 +1503,8 @@ int main(int argc, char* argv[]) {
 	}
 
 	int currentShader = 0;
+	shaderpick::load();                                   // favourites and the order / list settings
+	ui::bindShaders(&shaderFiles, &currentShader);       // the menu's Shaders page shows this list
 
 	// Pick up where the last session ended: same shader and image
 	{
@@ -1162,7 +1599,7 @@ int main(int argc, char* argv[]) {
 		if (uiRes.requestQuit) running = false; // sleep timer: close the app (state is saved on the way out)
 
 		// FTP server toggle with Minus button (with debouncing)
-		if (network_available) {
+		{ // (the FTP part: Minus checks for Wi-Fi itself)
 
 			/*
 			if (kDown & HidNpadButton_X && ftpEnabled) {
@@ -1173,13 +1610,30 @@ int main(int argc, char* argv[]) {
 			}
 			*/
 
-			if ((kDown & HidNpadButton_Minus) && (SDL_GetTicks() - lastFtpToggle > 500)) {
+			bool ftpBlocked = false; // Minus pressed to start the server, but it cannot be started
+			if ((kDown & HidNpadButton_Minus) && (SDL_GetTicks() - lastFtpToggle > 500) && !ftpEnabled) {
+				if (!wifiConnected()) {
+					ftpBlocked = true;
+					ui::toast("Wi-Fi is off or not connected. Turn Wi-Fi on first, then press Minus again");
+				}
+				else if (!ftpReady) { // Wi-Fi was off when the app started: set the server up now
+					ftpReady = ftp_init();
+					if (!ftpReady) {
+						ftpBlocked = true;
+						ui::toast("The FTP server could not be set up");
+					}
+				}
+				if (ftpBlocked) lastFtpToggle = SDL_GetTicks();
+			}
+
+			if (!ftpBlocked && (kDown & HidNpadButton_Minus) && (SDL_GetTicks() - lastFtpToggle > 500)) {
 				ftpEnabled = !ftpEnabled;
 				lastFtpToggle = SDL_GetTicks();
 
 				if (ftpEnabled) {
 					ftp_start(&pad);
 					printf("FTP server started\n");
+					ui::toast("FTP server started (port " + std::to_string(ftp_get_port()) + ", user " + ftp_get_username() + ")");
 					turn_led_on(LED_BREATHING);  // Start with breathing pattern
 					wasClientConnected = false;   // Reset connection state
 					currentLedPatternSet = true;
@@ -1188,9 +1642,10 @@ int main(int argc, char* argv[]) {
 				else {
 					ftp_stop(&pad);   // Pass the main program's pad
 					printf("FTP server stopped\n");
+					ui::toast("FTP server stopped");
 					turn_led_off();
 					ftpEnabled = false;
-					ftp_init(); //reinitialse as we cleaned the socket...
+					ftpReady = ftp_init(); //reinitialse as we cleaned the socket...
 				}
 			}
 
@@ -1307,6 +1762,7 @@ int main(int argc, char* argv[]) {
 				struct stat st;
 				if (stat(shaderFiles[currentShader].c_str(), &st) == 0 && st.st_mtime != g_shaderMtime) {
 					printf("Shader file changed, reloading\n");
+					fadeCancel();
 					glDeleteProgram(shader.prog);
 					shader = loadShaderFromFile(shaderFiles[currentShader]);
 				}
@@ -1358,6 +1814,7 @@ int main(int argc, char* argv[]) {
 				g_scanQuiet = false;
 				const bool listChanged = (fresh != shaderFiles);
 				if (listChanged) {
+					fadeCancel(); // the prepared shader's number is only valid for the old list
 					const std::string curPath = shaderFiles.empty() ? std::string() : shaderFiles[currentShader];
 					shaderFiles = fresh;
 					bool stillThere = false;
@@ -1367,6 +1824,7 @@ int main(int argc, char* argv[]) {
 					if (!stillThere) { // e.g. the current shader is docked-only and we just undocked
 						currentShader = 0;
 						if (!shaderFiles.empty()) {
+							fadeCancel();
 							glDeleteProgram(shader.prog);
 							shader = loadShaderFromFile(shaderFiles[0]);
 						}
@@ -1392,12 +1850,52 @@ int main(int argc, char* argv[]) {
 				lastAutoSecs = autoSecs;
 				lastShaderChange = SDL_GetTicks();
 			}
-			if (autoSecs > 0 && shaderFiles.size() > 1 && SDL_GetTicks() - lastShaderChange > (Uint32)autoSecs * 1000u) {
-				currentShader = (currentShader + 1) % (int)shaderFiles.size();
-				glDeleteProgram(shader.prog);
-				shader = loadShaderFromFile(shaderFiles[currentShader]);
+			const bool previewing = ui::shaderPreviewActive(); // (the Shaders page is trying shaders)
+			const bool autoOn = autoSecs > 0 && shaderFiles.size() > 1 && !previewing;
+			const Uint32 intervalMs = (Uint32)autoSecs * 1000u;
+			const Uint32 elapsedMs = SDL_GetTicks() - lastShaderChange;
+			// Smooth changes (Settings: "Smooth shader changes"): next / previous shader prepared early, automatic changes fade
+			const bool smoothOn = !shaderFiles.empty() && !previewing && player::configInt("shader_fade", 1) != 0 && ensureFadeResources();
+			const bool smoothAuto = smoothOn && autoOn && intervalMs >= 10000u;
+			if (!smoothOn) { prepFree(g_prepNext); prepFree(g_prepPrev); }
+			if (!smoothAuto) fadeFinish(); // (a fade in progress is finished, not thrown away)
+			if (smoothOn && g_fade.stage != Fade::FADING && elapsedMs > PREP_SETTLE_MS) {
+				prepUpdate(shaderFiles, currentShader, SDL_GetTicks(), (SDL_GetTicks() - startTicks) / 1000.0f, mouse, vbo, frameCount);
+			}
+			if (smoothAuto) {
+				fadeAutoStep(shaderFiles, currentShader, shader, lastShaderChange, elapsedMs, intervalMs);
+			}
+			else if (autoOn && elapsedMs > intervalMs) {
+				const int before = currentShader;
+				currentShader = shaderpick::pickIndex(shaderFiles, currentShader, +1); // follows "Shader order" and "Shader list"
+				if (shaderpick::consumeFallbackNotice()) ui::toast("No favourites for this mode yet - using all shaders");
+				if (currentShader != before) {
+					glDeleteProgram(shader.prog);
+					shader = loadShaderFromFile(shaderFiles[currentShader]);
+					announceShader(shaderFiles[currentShader]);
+				}
 				lastShaderChange = SDL_GetTicks(); // a manual L/R switch also restarts the countdown
-				ui::toast("Shader: " + player::baseName(shaderFiles[currentShader]));
+			}
+		}
+
+		// A shader picked on the menu's Shaders page (X)
+		{
+			std::string requested;
+			bool preview = false; // the Shaders page is only trying it: no toast and it is not remembered as your choice
+			if (ui::takeShaderRequest(requested, preview)) {
+				for (size_t i = 0; i < shaderFiles.size(); i++) {
+					if (shaderFiles[i] != requested) continue;
+					if ((int)i != currentShader) {
+						if (!preview) shaderpick::noteJump(shaderFiles[currentShader]);
+						currentShader = (int)i;
+						fadeCancel();
+						glDeleteProgram(shader.prog);
+						shader = loadShaderFromFile(shaderFiles[currentShader]);
+					}
+					lastShaderChange = SDL_GetTicks();
+					if (!preview) announceShader(shaderFiles[currentShader]);
+					break;
+				}
 			}
 		}
 
@@ -1405,26 +1903,25 @@ int main(int argc, char* argv[]) {
 		if (SDL_GetTicks() - lastShaderChange > 200) {
 			bool changed = false;
 
-			if (kDown & HidNpadButton_L) {  // Left shoulder button - Previous shader
+			if (kDown & (HidNpadButton_L | HidNpadButton_R)) { // L = previous shader, R = next (following "Shader order" and "Shader list")
 				if (!shaderFiles.empty()) {
-					currentShader = (currentShader - 1 + shaderFiles.size()) % shaderFiles.size();
-					changed = true;
-					printf("Previous shader: %s\n", shaderFiles[currentShader].c_str());
-				}
-			}
-			if (kDown & HidNpadButton_R) {  // Right shoulder button - Next shader
-				if (!shaderFiles.empty()) {
-					currentShader = (currentShader + 1) % shaderFiles.size();
-					changed = true;
-					printf("Next shader: %s\n", shaderFiles[currentShader].c_str());
+					const int before = currentShader;
+					currentShader = shaderpick::pickIndex(shaderFiles, currentShader, (kDown & HidNpadButton_L) ? -1 : +1);
+					if (shaderpick::consumeFallbackNotice()) ui::toast("No favourites for this mode yet - using all shaders");
+					changed = (currentShader != before);
+					if (changed) printf("%s shader: %s\n", (kDown & HidNpadButton_L) ? "Previous" : "Next", shaderFiles[currentShader].c_str());
 				}
 			}
 
 			if (changed) {
 				if (kDown & (HidNpadButton_L | HidNpadButton_R)) {
-					glDeleteProgram(shader.prog);
-					shader = loadShaderFromFile(shaderFiles[currentShader]);
-					ui::toast("Shader: " + player::baseName(shaderFiles[currentShader]));
+					fadeCancel(); // L / R always switch instantly
+					Prep& wanted = (kDown & HidNpadButton_L) ? g_prepPrev : g_prepNext;
+					if (!prepAdopt(wanted, shaderFiles, currentShader, shader)) { // not prepared (yet): load it the slow way
+						glDeleteProgram(shader.prog);
+						shader = loadShaderFromFile(shaderFiles[currentShader]);
+					}
+					announceShader(shaderFiles[currentShader]);
 				}
 				lastShaderChange = SDL_GetTicks();
 			}
@@ -1444,45 +1941,19 @@ int main(int argc, char* argv[]) {
 				player::isPlaying() ? "(Playing)" : "(Stopped)", player::position());
 		}
 
-		glUseProgram(shader.prog);
-		glUniform3f(shader.iResolutionLoc, 1280.0f, 720.0f, 1.0f);
-		glUniform1f(shader.iTimeLoc, time);
-
-		// Optional Shadertoy uniforms (only set if the shader declares them)
 		static float prevTime = 0.0f;
-		if (shader.iTimeDeltaLoc != -1) glUniform1f(shader.iTimeDeltaLoc, time - prevTime);
+		const float frameDt = time - prevTime;
 		prevTime = time;
-		// NOTE: declare as "uniform int iFrame;" in the shader
-		if (shader.iFrameLoc != -1) glUniform1i(shader.iFrameLoc, frameCount);
-		if (shader.iMouseLoc != -1) glUniform4f(shader.iMouseLoc, mouse[0], mouse[1], mouse[2], mouse[3]);
-		if (shader.iChannelResolutionLoc != -1) {
-			float res[12] = {
-				(float)FFT_SIZE, 1.0f, 1.0f,
-				(float)(FFT_SIZE / 2), 1.0f, 1.0f,
-				(float)g_img[0].w, (float)g_img[0].h, 1.0f,
-				(float)g_img[1].w, (float)g_img[1].h, 1.0f
-			};
-			glUniform3fv(shader.iChannelResolutionLoc, 4, res);
+
+		if (g_fade.stage == Fade::FADING) { // cross-fading from the old shader to the new one
+			const float p = (SDL_GetTicks() - g_fade.fadeStart) / (float)FADE_MS;
+			if (p >= 0.5f && !g_fade.directivesApplied) fadeApplyDirectives(); // scroller / model / audio flags of the new shader
+			if (p >= 1.0f) fadeFinish();
+			else drawFadeFrame(p, shader, time, frameDt, frameCount, mouse, vbo);
 		}
-
-		// Bind audio (0,1) and image (2,3) textures to the shader channels
-		const GLuint channelTex[4] = { audioTexWaveform, audioTexSpectrum, g_img[0].id, g_img[1].id };
-		for (int c = 0; c < 4; c++) {
-			if (shader.iChannelLoc[c] != -1) {
-				glActiveTexture(GL_TEXTURE0 + c);
-				glBindTexture(GL_TEXTURE_2D, channelTex[c]);
-				glUniform1i(shader.iChannelLoc[c], c);
-			}
+		if (g_fade.stage != Fade::FADING) {
+			drawShaderPass(shader, g_img, time, frameDt, frameCount, mouse, vbo);
 		}
-
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-		// Re-bind the vertex attributes before drawing
-		glBindBuffer(GL_ARRAY_BUFFER, vbo);
-		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
-		glEnableVertexAttribArray(0);
-
-		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
 		// 3D model layer (on top of the background shader, under the scroller)
 		{
@@ -1539,9 +2010,15 @@ int main(int argc, char* argv[]) {
 	player::shutdown();    // also saves the last track, position and queue
 	smbnet::trace("exit: stopping the network");
 	smbnet::shutdown();    // must happen BEFORE ftp_cleanup(): that closes the socket service the SMB connection needs
+	lrclib::shutdown();    // same for the online lyrics lookup
+	usbdrive::stop();      // unmounts the drives
+	if (g_nifmReady) nifmExit();
 	ftp_cleanup(&pad);     // Pass the pad parameter (also calls socketExit)
 	smbnet::trace("exit: sockets closed");
 	cleanupAudio();
+	fadeCancel();
+	prepFree(g_prepNext);
+	prepFree(g_prepPrev);
 	glDeleteTextures(1, &audioTexWaveform);
 	glDeleteTextures(1, &audioTexSpectrum);
 	scroller_shutdown();

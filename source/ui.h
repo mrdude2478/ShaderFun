@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string>
+#include <vector>
 
 namespace ui {
 
@@ -49,6 +50,9 @@ bool libraryOpen();
 bool lyricsAvailable();        // the current song has lyrics (a .lrc file or embedded in its tags)
 void lyricsShow(bool show);    // show / hide them (main.cpp: right stick right / left)
 int autoCycleSeconds();   // auto-change visualisation interval in seconds, 0 = off
+void bindShaders(const std::vector<std::string>* list, const int* current); // the shaders that can play now + the one showing (main.cpp)
+bool takeShaderRequest(std::string& path, bool& preview); // true once when a shader was chosen (preview = just trying it) on the Shaders page
+bool shaderPreviewActive(); // the Shaders page is open and playing previews
 bool infoOpen();   // the track info panel (L3, or tap the title) is showing
 
 } // namespace ui

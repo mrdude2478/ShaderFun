@@ -195,6 +195,42 @@ const char* get_ftp_password(void) { return g_ftp_config.password; }
 int get_max_clients(void) { return g_ftp_config.max_clients; }
 bool get_logging_enabled(void) { return g_ftp_config.logging_enabled; }
 
+// === Settings changed from the on-screen keyboard (ui.cpp) ===
+// The login commands are read with %s, so a name or password cannot hold spaces; and the config parser ignores
+// empty values (it would silently fall back to the default), so empty is refused too.
+static bool ftp_text_ok(const char* s, size_t maxLen) {
+	if (!s || !*s || strlen(s) > maxLen) return false;
+	for (const char* p = s; *p; p++) {
+		if ((unsigned char)*p <= ' ' || *p == 0x7f) return false;
+	}
+	return true;
+}
+
+int ftp_get_port(void) { return g_ftp_config.ftp_port; }
+const char* ftp_get_username(void) { return g_ftp_config.username; }
+const char* ftp_get_password(void) { return g_ftp_config.password; }
+
+bool ftp_set_port(int port) {
+	if (port < 1 || port > 65535) return false;
+	g_ftp_config.ftp_port = port;
+	create_default_config(); // rewrites ftp_config.txt from the current settings
+	return true;
+}
+
+bool ftp_set_username(const char* name) {
+	if (!ftp_text_ok(name, sizeof(g_ftp_config.username) - 1)) return false;
+	strcpy(g_ftp_config.username, name);
+	create_default_config();
+	return true;
+}
+
+bool ftp_set_password(const char* pass) {
+	if (!ftp_text_ok(pass, sizeof(g_ftp_config.password) - 1)) return false;
+	strcpy(g_ftp_config.password, pass);
+	create_default_config();
+	return true;
+}
+
 #define BUFFER_SIZE 4096
 int control_sock = 0;
 bool startftp = true;

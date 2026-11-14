@@ -18,7 +18,9 @@ file straight to your switch, press down on the left stick and your new shader s
 📝 Lyrics: timed `.lrc` files or lyrics embedded in your music files, with male/female/duet colours\
 😴 Sleep Timer: fades the music out, pauses (and can close the app so the Switch can sleep)\
 💾 Remembers Where You Were: last song and position, queue, shader, image and 3D model\
-🧊 3D Models: show textured OBJ models in your shaders, with a separate skin image if you like
+🧊 3D Models: show textured OBJ models in your shaders, with a separate skin image if you like\
+🌐 Network Music: browse and stream songs from an SMB share (router with a USB drive, NAS, PC), set up with the on-screen keyboard\
+💽 USB Drives: play music from a USB drive in the dock (FAT, exFAT, NTFS, EXT)
 
 ## Installation
 Download the latest release from the Releases page\
@@ -30,6 +32,9 @@ sdmc:/switch/shaderfun/\
 ├── images/         # Images for shaders (iChannel2/iChannel3) and 3D model skins\
 ├── models/         # 3D models (.obj) and their pictures\
 ├── playlists/      # Playlists (.m3u), created from the in-app library\
+├── cache/          # Created automatically: temporary downloads of network songs\
+├── smb.ini         # Created automatically: your network share details (see Network music)\
+├── smb.log         # Created automatically: a small log of network activity, restarted on every run\
 ├── config.ini      # Created automatically (music folder, volume, play mode, last song/shader, sleep timer options...)\
 ├── library.idx     # Created automatically: cache of your music tags\
 ├── last_queue.txt  # Created automatically: the queue you chose, restored on the next start\
@@ -45,7 +50,7 @@ Overlay: title / artist, progress bar, play-pause, previous/next, rewind/forward
 Touch: tap the buttons, drag the progress bar to seek, drag the volume slider, tap the mode icon to change repeat/shuffle.
 
 **Library** (press Y or tap the Library button): a panel slides in from the left while the shader keeps running behind it.\
-It opens on a menu: **Folders**, **Albums**, **Artists**, **Genres**, **Playlists**, **All songs** and **Rescan library**.\
+It opens on a menu: **Folders**, **Albums**, **Artists**, **Genres**, **Playlists**, **Network**, **USB drive**, **All songs** and **Rescan library**.\
 Albums, artists and genres come from the tags of your music files. The first time, the music folder is read in the background\
 (the menu shows the progress) and cached in `sdmc:/switch/shaderfun/library.idx`, so later starts only look at new or changed files.\
 Untagged files are grouped by folder name. Two albums with the same name by different artists stay separate, and albums with an\
@@ -62,7 +67,8 @@ Right stick right / left: jump to the next / previous first letter (A, B, C ...)
 L3 (left stick press): add the highlighted item to the end of the queue\
 R3 (right stick press): add the highlighted item to a playlist (see below)
 
-The menu page also has **Sleep timer**, **Resume on launch** and **Auto-change visualisation** rows (see below).
+The menu page also has **Sleep timer**, **Resume on launch** and **Auto-change visualisation** rows (see below).\
+**Network** and **USB drive** open music that is not on the SD card (see *Network music* and *USB drives* below).
 
 Play modes (R3 with the library closed, or the overlay icon): Repeat all, Shuffle, Repeat one, Play once.
 
@@ -78,7 +84,8 @@ it gets an automatic name like `Playlist 1`.
 The queue the player fills by itself at start-up is not included.
 
 **Open a playlist** to play it, and to use **Rename this playlist** (keyboard) or **Delete this playlist** (press A twice to confirm).\
-The Playlists count on the menu page updates as you add or delete. Playlists are plain `.m3u` files, so you can also edit them over FTP.
+The Playlists count on the menu page updates as you add or delete. Playlists are plain `.m3u` files, so you can also edit them over FTP.\
+Songs from a network share or a USB drive can't be added to playlists (their paths can change between runs).
 
 ## Sleep timer
 Library menu page, **Sleep timer**: press A to cycle Off, 15, 30, 45, 60, 90 minutes or *after this track*.\
@@ -91,6 +98,38 @@ setting in System Settings. The timer is not remembered between launches.
 On exit (and every 20 seconds while running) the app saves your last song and position, the queue you chose, play mode, volume and the\
 current shader, image, 3D model, material and scroller state. On the next start the song is loaded at its old position, paused.\
 Library menu page, **Resume on launch**, switches this to *keeps playing*. Delete `config.ini` / `last_queue.txt` to reset.
+
+## Network music (SMB)
+Play music straight from a shared folder on your network: a router with a USB drive plugged in, a NAS or a PC.\
+Only SMB2 and SMB3 are supported (the old SMB1 is not).
+
+**Setting it up:** library menu, **Network**. The first time this opens **Network settings**, where each row is typed with the Switch keyboard:\
+**Server address** (for example `192.168.0.1`), **Share name** (the name shown under `\\server` in Windows Explorer), **User name** (empty = guest),\
+**Password**, **Domain** (only for some Windows domains) and **Start folder** (a folder inside the share to start in). A single space clears a field.\
+Choose **Connect** when you are done. The details are saved in `sdmc:/switch/shaderfun/smb.ini`, which you can also edit by hand.\
+Later, the top page of the network browser has a **Network settings** row to change them.
+
+**Browsing and playing:** folders come first, then songs (the letter jump works here too). A plays a song and queues the rest of the folder,\
+**Play all songs in this folder** queues the lot, and L3 adds a song to the queue. A song starts playing about a second after its first part has arrived,\
+while the rest keeps downloading (MP3, FLAC, Ogg, Opus and WAV; other formats and songs over 64 MB are downloaded completely first).\
+The next song is fetched while you listen, so track changes are instant. Seeking works once the whole song has arrived.\
+A `.lrc` file next to a song on the share is fetched with it, so lyrics work for network songs too.
+
+**The cache:** downloads go to `sdmc:/switch/shaderfun/cache/` and are only temporary. Only the song playing and the next one are kept, and the folder is emptied when the app\
+starts and when it exits. In **Network settings**, **Keep downloaded songs on exit** keeps them instead, so the last song is ready straight away next time.
+
+**Limits:** network songs are not part of Albums, Artists and Genres, and can't be added to playlists. The password is stored as plain text in `smb.ini`.\
+`smb.log` records what the network code is doing (connections, downloads, errors) and is restarted every run. It never contains your password.
+
+## USB drives (docked)
+Plug a USB drive into the dock and open library menu, **USB drive**. Each drive is listed with its name (the volume label if it has one), its file system and its size.\
+Press A on a drive to browse it like any folder: play it, queue it, use the letter jump, lyrics and tags all work.\
+FAT12/16/32, exFAT, NTFS and EXT2/3/4 drives are supported. Drives are mounted read-only, because the player never writes to them.\
+A message appears when a drive is connected or removed. Use **Safely remove** on the USB page before unplugging (it stops playback from that drive first).\
+If you unplug a drive while browsing it, you are taken back to the menu.
+
+**Limits:** USB drives only work with the dock (not handheld). A folder on a drive can't be your music folder, USB music is not part of Albums, Artists and Genres, songs from it\
+can't be added to playlists, and a song from a drive is not restored when the app starts (the drive is not mounted yet). If the row says *not available*, the USB service could not start.
 
 ## Lyrics
 With the library closed, push the **right stick right** to show lyrics and **left** to hide them. They stay on for the next songs and hide\
@@ -248,7 +287,52 @@ void main() {
 Prerequisites:\
 devkitPro with Switch toolchain\
 SDL2, SDL2_mixer (2.6 or newer recommended: gives track tags, duration and accurate seeking), SDL2_image, SDL2_ttf\
-OpenGL ES 2.0
+OpenGL ES 2.0\
+The SDL2 libraries come from devkitPro's package manager (the codec libraries SDL2_mixer needs are installed with it):\
+`pacman -S switch-sdl2 switch-sdl2_mixer switch-sdl2_image switch-sdl2_ttf`\
+(`pacman -Qi switch-sdl2_mixer` shows which SDL2_mixer version you have; use `dkp-pacman` if that is what your install calls it.)
+libsmb2 (network music) and libusbhsfs, GPL build (USB drives): see below
+
+**libsmb2** (SMB client):\
+`git clone https://github.com/sahlberg/libsmb2.git`\
+`cd libsmb2`\
+`make -f Makefile.platform switch_install`\
+If the install step stops with *multiple target patterns* (a make problem with Windows paths), the library itself has been built: copy `libsmb2.a` (from `build/lib`) to\
+`$DEVKITPRO/portlibs/switch/lib` and the files in `include/smb2` to `$DEVKITPRO/portlibs/switch/include/smb2`.
+
+**libusbhsfs** (USB mass storage), GPL build with NTFS and EXT support. ShaderFun uses a **modified copy** of libusbhsfs 0.2.10, included in this repository in the `libusbhsfs` folder.\
+The changes make more drives mount, and add a `volume_label` field to `UsbHsFsDevice` that `usbdrive.cpp` uses to name a drive. Don't use the unmodified upstream library: some drives won't mount, and `usbdrive.cpp` won't compile.\
+`pacman -S switch-ntfs-3g switch-lwext4`\
+`cd libusbhsfs`\
+`make BUILD_TYPE=GPL install`
+
+### Optional: building SDL2_mixer 2.8.1 yourself
+The package from `pacman` is enough to build ShaderFun. The author runs SDL2_mixer 2.8.1 built from source, which is only needed if you want a newer version than the package.\
+Get the SDL_mixer source ([github.com/libsdl-org/SDL_mixer](https://github.com/libsdl-org/SDL_mixer), tag `release-2.8.1`), then in an empty `build` folder inside it:
+
+```
+cmake .. \
+  -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake \
+  -DCMAKE_INSTALL_PREFIX=$DEVKITPRO/portlibs/switch \
+  -DSDL2MIXER_BUILD_SHARED_LIBS=OFF \
+  -DSDL2MIXER_VENDORED=OFF \
+  -DSDL2MIXER_WAVE=ON \
+  -DSDL2MIXER_FLAC=ON -DSDL2MIXER_FLAC_DRFLAC=ON \
+  -DSDL2MIXER_MP3=ON -DSDL2MIXER_MP3_MINIMP3=ON \
+  -DSDL2MIXER_VORBIS=TREMOR -DSDL2MIXER_VORBIS_TREMOR_SHARED=OFF \
+  -DSDL2MIXER_MOD=ON -DSDL2MIXER_MOD_MODPLUG=ON -DSDL2MIXER_MOD_MODPLUG_SHARED=OFF -DSDL2MIXER_MOD_XMP=OFF \
+  -DSDL2MIXER_OPUS=ON -DSDL2MIXER_OPUS_SHARED=OFF \
+  -DSDL2MIXER_MIDI=ON -DSDL2MIXER_MIDI_TIMIDITY=ON -DSDL2MIXER_MIDI_FLUIDSYNTH=OFF \
+  -DSDL2MIXER_GME=OFF \
+  -DSDL2MIXER_WAVPACK=OFF
+make -j$(nproc)
+make install
+```
+
+Afterwards fix the pkg-config file, because it names Tremor differently from devkitPro's library:\
+1. Open `$DEVKITPRO/portlibs/switch/lib/pkgconfig/SDL2_mixer.pc` in a text editor.\
+2. Find the line starting with `Requires.private:` (or `Requires:`).\
+3. In that list, replace `tremor` with `vorbisidec`.
 
 ## Build Instructions
 git clone https://github.com/mrdude2478/shaderfun.git \
@@ -270,6 +354,15 @@ Lyrics not showing:\
 Put `Song.lrc` next to `Song.mp3` (same name), or use files with embedded lyrics\
 Push the right stick right with the library closed\
 
+Network music not connecting:\
+Check the server address and the share name in Network settings (and the user name and password)\
+Only SMB2/SMB3 shares work, not SMB1\
+`smb.log` in `sdmc:/switch/shaderfun/` shows what happened (it never contains your password)
+
+USB drive not showing:\
+Use the dock (USB host mode does not work handheld)\
+Wait a few seconds after plugging it in. If the USB row says *not available*, the USB service could not start\
+
 FTP Server Issues:\
 Verify network connection\
 Check firewall settings\
@@ -279,12 +372,17 @@ Ensure sufficient free memory
 KissFFT - Fast Fourier Transform library\
 SDL2 - Cross-platform development library\
 SDL2_mixer - Audio mixing library\
+[libsmb2](https://github.com/sahlberg/libsmb2) - SMB2/3 client library (LGPL 2.1)\
+[libusbhsfs](https://github.com/DarkMatterCore/libusbhsfs) - USB mass storage support (GPL build, modified copy included in the `libusbhsfs` folder), with NTFS-3G and lwext4\
 DejaVu Sans - UI font (see DejaVu-LICENSE.txt)\
 Switch Homebrew Community\
 [Mod Archive](https://modarchive.org/)
 
 ## License
-This project is licensed under the MIT License - see the LICENSE file for details.
+The ShaderFun source code is licensed under the MIT License - see the LICENSE file for details.\
+USB drive support links the GPL build of libusbhsfs (together with NTFS-3G and lwext4), so program builds that include it are distributed under the terms of the GPL v2 or later.\
+The modified libusbhsfs source is in the `libusbhsfs` folder, with its own `LICENSE_GPLv2+.md`.\
+The network support links libsmb2 (LGPL 2.1).
 
 ## Contributing
 Contributions are welcome! Please feel free to submit pull requests, report bugs, or suggest new features.
