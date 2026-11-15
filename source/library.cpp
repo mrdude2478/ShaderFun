@@ -394,6 +394,8 @@ int scanDone() { return SDL_AtomicGet(&g_done); }
 int scanTotal() { return SDL_AtomicGet(&g_total); }
 uint32_t version() { return (uint32_t)SDL_AtomicGet(&g_version); }
 
+std::shared_ptr<const Snapshot> makeSnapshot(std::vector<Track> tracks) { return buildSnapshot(std::move(tracks)); }
+
 std::shared_ptr<const Snapshot> snapshot() {
 	if (!g_mu) return std::make_shared<Snapshot>();
 	SDL_LockMutex(g_mu);

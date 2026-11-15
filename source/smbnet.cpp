@@ -42,6 +42,7 @@ SDL_cond* g_cv = nullptr;
 SDL_Thread* g_thread = nullptr;
 bool g_quit = false;
 bool g_needReconnect = true;
+int g_connGen = 0;   // counts destroyed connections: an open file handle is only valid for the connection it was opened on
 Settings g_settings;
 
 bool g_listPending = false;
@@ -75,6 +76,16 @@ struct Stream {
 std::shared_ptr<Stream> g_stream;   // the song being streamed
 std::string g_streamPending;        // waiting for the worker to pick it up
 SDL_cond* g_streamCv = nullptr;     // readers wait here for more data
+// ---- tree scan (guarded by g_mu)
+bool g_scanActive = false, g_scanCancel = false;
+std::deque<std::string> g_scanQueue;   // folders still to visit
+ScanDirFn g_scanOnDir;
+ScanDoneFn g_scanOnDone;
+int g_scanErrors = 0;
+// ---- background task (guarded by g_mu)
+bool g_taskActive = false, g_taskCancel = false;
+TaskStepFn g_taskStep;
+TaskDoneFn g_taskDone;
 volatile int g_workerExited = 0;
 SDL_mutex* g_logMu = nullptr;
 FILE* g_log = nullptr;
@@ -229,6 +240,7 @@ void disconnect(bool graceful = true) {
 		if (graceful) smb2_disconnect_share(g_ctx); // not when quitting: the network may be gone and the call could hang
 		smb2_destroy_context(g_ctx);
 		g_ctx = nullptr;
+		g_connGen++;
 	}
 }
 
@@ -281,9 +293,8 @@ void markBroken() {
 }
 
 // ------------------------------------------------------------------ jobs (worker thread)
-void doList(const std::string& dir) {
-	std::vector<Entry> out;
-	std::string err;
+// lists one folder (trying again once on a new connection). Used by browsing and by the tree scan.
+bool listDirectory(const std::string& dir, std::vector<Entry>& out, std::string& err) {
 	bool ok = false;
 	for (int attempt = 0; attempt < 2 && !ok; attempt++) {
 		if (!ensureConnected(err)) break;
@@ -302,11 +313,19 @@ void doList(const std::string& dir) {
 			if (ent->st.smb2_type == SMB2_TYPE_DIRECTORY) e.isDir = true;
 			else if (ent->st.smb2_type != SMB2_TYPE_FILE) continue;
 			e.size = ent->st.smb2_size;
+			e.mtime = (int64_t)ent->st.smb2_mtime;
 			out.push_back(e);
 		}
 		smb2_closedir(g_ctx, d);
 		ok = true;
 	}
+	return ok;
+}
+
+void doList(const std::string& dir) {
+	std::vector<Entry> out;
+	std::string err;
+	const bool ok = listDirectory(dir, out, err);
 	SDL_LockMutex(g_mu);
 	g_listFinished = true;
 	g_listOk = ok;
@@ -553,13 +572,83 @@ void doStream(std::shared_ptr<Stream> sp) {
 	remove(sp->marker.c_str());
 }
 
+// ------------------------------------------------------------------ tree scan (worker thread)
+void scanFinish(bool completed, const std::string& message) {
+	SDL_LockMutex(g_mu);
+	const ScanDoneFn done = g_scanOnDone;
+	const int errors = g_scanErrors;
+	g_scanOnDone = nullptr;
+	g_scanOnDir = nullptr;
+	g_scanActive = false;
+	g_scanCancel = false;
+	g_scanQueue.clear();
+	SDL_UnlockMutex(g_mu);
+	trace("scan: finished (completed=%d, folder errors=%d) %s", completed ? 1 : 0, errors, message.c_str());
+	if (done) done(completed, errors, message);
+}
+
+// visits one folder
+void scanStep() {
+	SDL_LockMutex(g_mu);
+	if (!g_scanActive) { SDL_UnlockMutex(g_mu); return; }
+	if (g_scanCancel) { SDL_UnlockMutex(g_mu); scanFinish(false, "Scan cancelled"); return; }
+	if (g_scanQueue.empty()) { SDL_UnlockMutex(g_mu); scanFinish(true, ""); return; }
+	const std::string dir = g_scanQueue.front();
+	g_scanQueue.pop_front();
+	const ScanDirFn onDir = g_scanOnDir;
+	SDL_UnlockMutex(g_mu);
+
+	std::vector<Entry> entries;
+	std::string err;
+	if (!listDirectory(dir, entries, err)) {
+		trace("scan: could not list '%s': %s", dir.c_str(), err.c_str());
+		if (err.compare(0, 13, "Could not con") == 0 || err.compare(0, 7, "Set up ") == 0) { scanFinish(false, err); return; } // no connection at all
+		SDL_LockMutex(g_mu);
+		const int errors = ++g_scanErrors;
+		SDL_UnlockMutex(g_mu);
+		if (errors >= 20) scanFinish(false, "Too many folders could not be read");
+		return;
+	}
+	SDL_LockMutex(g_mu);
+	int depth = 0;
+	for (char c : dir) if (c == '/') depth++;
+	if (depth < 12) { // (a limit against loops made by links)
+		for (const Entry& e : entries) if (e.isDir) g_scanQueue.push_back(dir.empty() ? e.name : dir + "/" + e.name);
+	}
+	SDL_UnlockMutex(g_mu);
+	if (onDir) onDir(dir, entries);
+}
+
+// ------------------------------------------------------------------ background task (worker thread)
+void taskFinish(bool cancelled, const std::string& message) {
+	SDL_LockMutex(g_mu);
+	const TaskDoneFn done = g_taskDone;
+	g_taskDone = nullptr;
+	g_taskStep = nullptr;
+	g_taskActive = false;
+	g_taskCancel = false;
+	SDL_UnlockMutex(g_mu);
+	trace("task: finished (cancelled=%d)", cancelled ? 1 : 0);
+	if (done) done(cancelled, message);
+}
+
+void taskStep() {
+	SDL_LockMutex(g_mu);
+	if (!g_taskActive) { SDL_UnlockMutex(g_mu); return; }
+	if (g_taskCancel) { SDL_UnlockMutex(g_mu); taskFinish(true, "Stopped"); return; }
+	const TaskStepFn step = g_taskStep;
+	SDL_UnlockMutex(g_mu);
+	const bool more = step ? step() : false;
+	if (!more) taskFinish(false, "");
+}
+
 int workerMain(void*) {
 	g_socketsStarted = R_SUCCEEDED(socketInitializeDefault());
 	trimCache();
 	while (true) {
 		SDL_LockMutex(g_mu);
-		if (!g_quit && !g_listPending && g_streamPending.empty() && g_urgent.empty() && g_background.empty()) trace("worker: idle");
-		while (!g_quit && !g_listPending && g_streamPending.empty() && g_urgent.empty() && g_background.empty()) SDL_CondWait(g_cv, g_mu);
+		if (!g_quit && !g_listPending && g_streamPending.empty() && g_urgent.empty() && g_background.empty() && !g_scanActive && !g_taskActive) trace("worker: idle");
+		while (!g_quit && !g_listPending && g_streamPending.empty() && g_urgent.empty() && g_background.empty() && !g_scanActive && !g_taskActive) SDL_CondWait(g_cv, g_mu);
 		if (g_quit) { SDL_UnlockMutex(g_mu); break; }
 		if (g_listPending) { SDL_UnlockMutex(g_mu); serveList(); continue; }
 		if (!g_streamPending.empty()) {
@@ -576,6 +665,12 @@ int workerMain(void*) {
 				g_current.clear();
 			}
 			SDL_UnlockMutex(g_mu);
+			continue;
+		}
+		if (g_urgent.empty() && g_background.empty()) { // nothing more important is waiting: scan one folder / do one step of the task
+			const bool doScan = g_scanActive;
+			SDL_UnlockMutex(g_mu);
+			if (doScan) scanStep(); else taskStep();
 			continue;
 		}
 		std::string path;
@@ -711,6 +806,107 @@ bool pollList(std::string& dir, std::vector<Entry>& entries, std::string& error,
 	}
 	SDL_UnlockMutex(g_mu);
 	return finished;
+}
+
+bool startTreeScan(const std::string& startDir, ScanDirFn onDir, ScanDoneFn onDone) {
+	ensureThread();
+	SDL_LockMutex(g_mu);
+	if (g_scanActive) { SDL_UnlockMutex(g_mu); return false; }
+	g_scanActive = true;
+	g_scanCancel = false;
+	g_scanErrors = 0;
+	g_scanQueue.clear();
+	g_scanQueue.push_back(startDir);
+	g_scanOnDir = onDir;
+	g_scanOnDone = onDone;
+	SDL_CondSignal(g_cv);
+	SDL_UnlockMutex(g_mu);
+	trace("scan: started at '%s'", startDir.c_str());
+	return true;
+}
+
+void cancelTreeScan() {
+	if (!g_mu) return;
+	SDL_LockMutex(g_mu);
+	if (g_scanActive) g_scanCancel = true;
+	SDL_CondSignal(g_cv);
+	SDL_UnlockMutex(g_mu);
+}
+
+bool treeScanning() {
+	if (!g_mu) return false;
+	SDL_LockMutex(g_mu);
+	const bool a = g_scanActive;
+	SDL_UnlockMutex(g_mu);
+	return a;
+}
+
+bool startTask(TaskStepFn step, TaskDoneFn done) {
+	ensureThread();
+	SDL_LockMutex(g_mu);
+	if (g_taskActive) { SDL_UnlockMutex(g_mu); return false; }
+	g_taskActive = true;
+	g_taskCancel = false;
+	g_taskStep = step;
+	g_taskDone = done;
+	SDL_CondSignal(g_cv);
+	SDL_UnlockMutex(g_mu);
+	return true;
+}
+
+void cancelTask() {
+	if (!g_mu) return;
+	SDL_LockMutex(g_mu);
+	if (g_taskActive) g_taskCancel = true;
+	SDL_CondSignal(g_cv);
+	SDL_UnlockMutex(g_mu);
+}
+
+bool taskRunning() {
+	if (!g_mu) return false;
+	SDL_LockMutex(g_mu);
+	const bool a = g_taskActive;
+	SDL_UnlockMutex(g_mu);
+	return a;
+}
+
+bool RemoteFile::open(const std::string& remotePath, uint64_t* sizeOut) {
+	close();
+	error.clear();
+	const std::string inner = remoteInner(remotePath);
+	std::string err;
+	for (int attempt = 0; attempt < 2 && !fh_; attempt++) {
+		if (!ensureConnected(err)) { error = err; return false; }
+		smb2fh* fh = smb2_open(g_ctx, inner.c_str(), O_RDONLY);
+		if (fh) { fh_ = fh; gen_ = g_connGen; }
+		else { error = std::string("Could not open: ") + smb2_get_error(g_ctx); markBroken(); }
+	}
+	if (!fh_) return false;
+	if (sizeOut) {
+		smb2_stat_64 st;
+		*sizeOut = (smb2_fstat(g_ctx, (smb2fh*)fh_, &st) == 0) ? st.smb2_size : 0;
+	}
+	return true;
+}
+
+bool RemoteFile::read(uint64_t offset, size_t length, std::vector<uint8_t>& out) {
+	out.clear();
+	if (!fh_ || !g_ctx) return false;
+	out.resize(length);
+	size_t got = 0;
+	while (got < length) {
+		const int n = smb2_pread(g_ctx, (smb2fh*)fh_, out.data() + got, (uint32_t)(length - got), offset + got);
+		if (n < 0) { error = std::string("Read failed: ") + smb2_get_error(g_ctx); markBroken(); break; }
+		if (n == 0) break; // end of the file
+		got += (size_t)n;
+	}
+	out.resize(got);
+	return got > 0 || length == 0;
+}
+
+void RemoteFile::close() {
+	if (fh_ && g_ctx && gen_ == g_connGen) smb2_close(g_ctx, (smb2fh*)fh_); // (not when the connection was replaced meanwhile)
+	fh_ = nullptr;
 }
 
 bool cachedFile(const std::string& remotePath, std::string& localPath) {

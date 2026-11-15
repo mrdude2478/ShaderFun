@@ -17,6 +17,7 @@ const size_t MAX_COVER_BYTES = 24u * 1024u * 1024u;
 struct Reader {
 	FILE* f = nullptr;
 	uint64_t size = 0;
+	std::function<bool(uint64_t, void*, size_t)> fetch; // set instead of f for files that are read some other way (the network)
 
 	bool open(const std::string& path) {
 		f = fopen(path.c_str(), "rb");
@@ -31,6 +32,8 @@ struct Reader {
 
 	bool read(uint64_t off, void* buf, size_t n) {
 		if (off + n > size) return false;
+		if (fetch) return fetch(off, buf, n);
+		if (!f) return false;
 		if (fseek(f, (long)off, SEEK_SET) != 0) return false;
 		return fread(buf, 1, n, f) == n;
 	}
@@ -746,12 +749,10 @@ std::string extensionOf(const std::string& path) {
 
 std::string base64Decode(const std::string& in, std::vector<uint8_t>& out) { return b64decode(in, out); }
 
-bool read(const std::string& path, TrackTags& t, double durationSeconds, bool light, bool wantLyrics) {
+static bool readWith(Reader& r, const std::string& path, TrackTags& t, double durationSeconds, bool light, bool wantLyrics) {
 	const bool wantCover = !light;
 	t = TrackTags();
 	t.wantLyrics = wantLyrics;
-	Reader r;
-	if (!r.open(path)) return false;
 	t.fileSize = r.size;
 
 	uint8_t head[16] = { 0 };
@@ -793,6 +794,20 @@ bool read(const std::string& path, TrackTags& t, double durationSeconds, bool li
 		t.bitrateKbps = (int)((double)audioBytes * 8.0 / durationSeconds / 1000.0 + 0.5);
 	}
 	return true;
+}
+
+bool read(const std::string& path, TrackTags& t, double durationSeconds, bool light, bool wantLyrics) {
+	Reader r;
+	if (!r.open(path)) return false;
+	return readWith(r, path, t, durationSeconds, light, wantLyrics);
+}
+
+bool readRemote(const std::string& fileName, uint64_t fileSize, const std::function<bool(uint64_t, void*, size_t)>& fetch,
+	TrackTags& t, double durationSeconds) {
+	Reader r;
+	r.size = fileSize;
+	r.fetch = fetch;
+	return readWith(r, fileName, t, durationSeconds, true, false);
 }
 
 } // namespace tags

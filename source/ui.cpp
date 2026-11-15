@@ -10,6 +10,8 @@
 #include "shaderpick.h"
 #include <switch.h> // software keyboard (swkbd)
 #include "ftp.h"       // FTP port / user name / password (edited from Settings)
+#include "smbscan.h"  // scanning the SMB share into the database (Network settings)
+#include "smblib.h"   // the network library (loaded from the database)
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -691,11 +693,11 @@ const float EQ_TRACK_X0 = 190.0f, EQ_TRACK_X1 = 560.0f, EQ_VALUE_X = 575.0f; // 
 // ============================================================================ library
 enum RowKind {
 	R_UP, R_PLAYDIR, R_SETDIR, R_DIR, R_FILE,                                   // folder browser
-	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, R_FTPSETTINGS, R_FTPFIELD, R_USBDRIVE, R_USBEJECT, R_SHADER, R_SEARCHAGAIN, // library views
-	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_USB, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT, R_HOME_SHADERS, R_HOME_SHORDER, R_HOME_SHSCOPE, R_HOME_SEARCH, R_HOME_ONLINELYR, R_HOME_SETTINGS, R_HOME_SHTOAST, R_HOME_SHFADE, R_HOME_HUDTRACK,
+	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, R_NETSCAN, R_SMB_ALBUMS, R_SMB_ARTISTS, R_SMB_GENRES, R_SMB_ALL, R_FTPSETTINGS, R_FTPFIELD, R_USBDRIVE, R_USBEJECT, R_SHADER, R_SEARCHAGAIN, // library views
+	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_SMB, R_HOME_USB, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT, R_HOME_SHADERS, R_HOME_SHORDER, R_HOME_SHSCOPE, R_HOME_SEARCH, R_HOME_ONLINELYR, R_HOME_SETTINGS, R_HOME_SHTOAST, R_HOME_SHFADE, R_HOME_HUDTRACK,
 	R_HOME_EQ, R_EQ_BYPASS, R_EQ_PRESET, R_EQ_BAND0, R_EQ_BAND1, R_EQ_BAND2, R_EQ_BAND3, R_EQ_BAND4, R_EQ_BAND5, R_EQ_BAND6, R_EQ_BAND7, R_EQ_BAND8, R_EQ_BAND9
 };
-enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_NETSETTINGS, PG_FTPSETTINGS, PG_USB, PG_SHADERS, PG_SEARCH, PG_SETTINGS, PG_EQUALIZER };
+enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_SMBHOME, PG_NETSETTINGS, PG_FTPSETTINGS, PG_USB, PG_SHADERS, PG_SEARCH, PG_SETTINGS, PG_EQUALIZER };
 
 struct Row {
 	RowKind kind;
@@ -924,12 +926,19 @@ View makeTrackView(PageKind kind, const std::string& title, const std::string& s
 
 std::string usbSummary(); // defined with the USB page below
 
+// what the home page says about the network library
+std::string smbSummary() {
+	if (smblib::loading() && smblib::snapshot()->tracks.empty()) return "loading...";
+	const size_t n = smblib::snapshot()->tracks.size();
+	return n == 0 ? std::string("not scanned yet (Network settings)") : std::to_string(n) + " songs";
+}
+
 View makeHome(int plCount) {
 	View v;
 	v.kind = PG_HOME;
 	v.title = "Library";
 	v.snap = library::snapshot();
-	v.builtVersion = library::version();
+	v.builtVersion = library::version() + smblib::version();
 	v.builtDone = library::scanDone();
 	v.builtScanning = library::scanning();
 	v.plCount = plCount;
@@ -943,6 +952,7 @@ View makeHome(int plCount) {
 	v.rows.push_back({ R_HOME_PLAYLISTS, "Playlists", "", std::to_string(plCount) });
 	v.rows.push_back({ R_HOME_ALL, "All songs", "", std::to_string(s.tracks.size()) });
 	v.rows.push_back({ R_HOME_NETWORK, "Network", "", smbnet::label() });
+	v.rows.push_back({ R_HOME_SMB, "Network library", "", smbSummary() });
 	v.rows.push_back({ R_HOME_USB, "USB drive", "", usbSummary() });
 	v.rows.push_back({ R_HOME_SETTINGS, "Settings", "", "sleep timer, lyrics, shaders..." });
 	v.rows.push_back({ R_HOME_RESCAN, "Rescan library", "",
@@ -952,10 +962,11 @@ View makeHome(int plCount) {
 	return v;
 }
 
-View makeGroupList(PageKind kind) {
+View makeGroupList(PageKind kind, std::shared_ptr<const library::Snapshot> useSnap = nullptr) {
+	const bool network = (useSnap != nullptr); // the network library instead of the SD card
 	View v;
 	v.kind = kind;
-	v.snap = library::snapshot();
+	v.snap = network ? useSnap : library::snapshot();
 	const library::Snapshot& s = *v.snap;
 	const std::vector<library::Group>& src = (kind == PG_ALBUMS) ? s.albums : (kind == PG_ARTISTS) ? s.artists : s.genres;
 	v.groups = src;
@@ -963,7 +974,7 @@ View makeGroupList(PageKind kind) {
 	v.subtitle = plural(src.size(), kind == PG_ALBUMS ? "album" : kind == PG_ARTISTS ? "artist" : "genre",
 		kind == PG_ALBUMS ? "albums" : kind == PG_ARTISTS ? "artists" : "genres");
 	v.empty = src.empty();
-	v.emptyMsg = library::scanning() ? "Scanning your music..." : "No tracks in the library yet";
+	v.emptyMsg = network ? std::string("Nothing here yet - scan the share in Network settings") : library::scanning() ? "Scanning your music..." : "No tracks in the library yet";
 	v.rows.push_back({ R_BACK, "Back", "", "" });
 	const RowKind rk = (kind == PG_ALBUMS) ? R_ALBUM : (kind == PG_ARTISTS) ? R_ARTIST : R_GENRE;
 	for (size_t i = 0; i < src.size(); i++) {
@@ -1018,13 +1029,31 @@ void sortByTitle(const library::Snapshot& s, std::vector<int>& idx) {
 	for (size_t k = 0; k < keyed.size(); k++) idx[k] = keyed[k].second;
 }
 
-View makeAllSongs() {
-	auto snap = library::snapshot();
+View makeAllSongs(std::shared_ptr<const library::Snapshot> useSnap = nullptr) {
+	const bool network = (useSnap != nullptr);
+	auto snap = network ? useSnap : library::snapshot();
 	std::vector<int> all(snap->tracks.size());
 	for (size_t i = 0; i < all.size(); i++) all[i] = (int)i;
 	sortByTitle(*snap, all);
 	View v = makeTrackView(PG_ALL, "All songs", plural(all.size(), "track", "tracks"), itemsFromTracks(*snap, all, 2), "Play all", snap);
-	v.emptyMsg = library::scanning() ? "Scanning your music..." : "No tracks in the library yet";
+	v.emptyMsg = network ? std::string("Nothing here yet - scan the share in Network settings") : library::scanning() ? "Scanning your music..." : "No tracks in the library yet";
+	return v;
+}
+
+// the network library page: albums, artists, genres and all songs of the scanned share
+View makeSmbHome() {
+	View v;
+	v.kind = PG_SMBHOME;
+	v.title = "Network library";
+	v.snap = smblib::snapshot();
+	const library::Snapshot& s = *v.snap;
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_SMB_ALBUMS, "Albums", "", std::to_string(s.albums.size()) });
+	v.rows.push_back({ R_SMB_ARTISTS, "Artists", "", std::to_string(s.artists.size()) });
+	v.rows.push_back({ R_SMB_GENRES, "Genres", "", std::to_string(s.genres.size()) });
+	v.rows.push_back({ R_SMB_ALL, "All songs", "", std::to_string(s.tracks.size()) });
+	v.subtitle = s.tracks.empty() ? std::string(smblib::loading() ? "Loading..." : "Not scanned yet - use Network settings") : plural(s.tracks.size(), "song", "songs");
+	v.sel = 1;
 	return v;
 }
 
@@ -1150,7 +1179,7 @@ void libRefreshHome() {
 	if (g_lib.stack.empty()) return;
 	View& h = g_lib.stack[0];
 	const bool scan = library::scanning();
-	if (!h.dirty && h.builtVersion == library::version() && h.builtScanning == scan && (!scan || h.builtDone == library::scanDone())) return;
+	if (!h.dirty && h.builtVersion == library::version() + smblib::version() && h.builtScanning == scan && (!scan || h.builtDone == library::scanDone())) return;
 	View nv = makeHome(h.plCount);
 	nv.sel = std::min(std::max(h.sel, 0), (int)nv.rows.size() - 1); // a row may have disappeared (sleep timer option)
 	nv.scroll = h.scroll;
@@ -1578,6 +1607,7 @@ View makeNetSettingsView() {
 	v.rows.push_back({ R_NETFIELD, "Domain", "", val(c.domain, "(none)"), 4 });
 	v.rows.push_back({ R_NETFIELD, "Start folder", "", val(c.folder, "(top of the share)"), 5 });
 	v.rows.push_back({ R_NETKEEP, "Keep downloaded songs on exit", "", smbnet::keepCache() ? "yes" : "no" });
+	v.rows.push_back({ R_NETSCAN, "Scan the share into the database", "", smbscan::running() ? "scanning... (select to stop)" : "select to start" });
 	v.rows.push_back({ R_NETCONNECT, "Connect", "", "" });
 	v.sel = (c.server.empty() || c.share.empty()) ? 1 : (int)v.rows.size() - 1;
 	return v;
@@ -2008,6 +2038,11 @@ void libActivate(int idx) {
 	case R_HOME_GENRES: libPush(makeGroupList(PG_GENRES)); break;
 	case R_HOME_PLAYLISTS: libUpdatePlaylistCount(); libPush(makePlaylistsView()); break;
 	case R_HOME_NETWORK: libOpenNetwork(); break;
+	case R_HOME_SMB: libPush(makeSmbHome()); break;
+	case R_SMB_ALBUMS: { View nv = makeGroupList(PG_ALBUMS, smblib::snapshot()); nv.title = "Network albums"; libPush(std::move(nv)); break; }
+	case R_SMB_ARTISTS: { View nv = makeGroupList(PG_ARTISTS, smblib::snapshot()); nv.title = "Network artists"; libPush(std::move(nv)); break; }
+	case R_SMB_GENRES: { View nv = makeGroupList(PG_GENRES, smblib::snapshot()); nv.title = "Network genres"; libPush(std::move(nv)); break; }
+	case R_SMB_ALL: { View nv = makeAllSongs(smblib::snapshot()); nv.title = "Network songs"; libPush(std::move(nv)); break; }
 	case R_HOME_SEARCH: libSearch(false); break;
 	case R_HOME_HUDTRACK:
 		player::setConfigInt("hud_on_track", player::configInt("hud_on_track", 1) ? 0 : 1);
@@ -2079,6 +2114,21 @@ void libActivate(int idx) {
 	case R_FTPFIELD: libEditFtpField(row.ref); break;
 	case R_NETFIELD: libEditNetField(row.ref); break;
 	case R_NETCONNECT: libNetConnect(); break;
+	case R_NETSCAN: {
+		if (smbscan::running()) { smbscan::cancel(); showToast("Stopping the scan..."); }
+		else if (smbscan::start()) showToast("Scanning the share in the background. A message appears when it is done");
+		View& cv = cur();
+		if (cv.kind == PG_NETSETTINGS) { // redraw the page, keeping the selection
+			const int sel = cv.sel;
+			const float sc = cv.scroll;
+			cv = makeNetSettingsView();
+			cv.sel = sel;
+			cv.scroll = sc;
+			clampScroll(cv);
+			cv.scrollDisp = cv.scroll;
+		}
+		break;
+	}
 	case R_NETKEEP: {
 		const bool keep = !smbnet::keepCache();
 		smbnet::setKeepCache(keep);
@@ -2325,7 +2375,7 @@ void libJumpTo(int index) {
 
 bool rowOpensSomething(RowKind k) {
 	return k == R_DIR || k == R_ALBUM || k == R_ARTIST || k == R_GENRE || k == R_PLAYLIST ||
-		k == R_NETDIR || k == R_NETSETTINGS || k == R_FTPSETTINGS || k == R_HOME_SHADERS || k == R_HOME_SEARCH || k == R_HOME_SETTINGS || (k >= R_HOME_FOLDERS && k <= R_HOME_ALL);
+		k == R_NETDIR || k == R_NETSETTINGS || k == R_FTPSETTINGS || k == R_SMB_ALBUMS || k == R_SMB_ARTISTS || k == R_SMB_GENRES || k == R_SMB_ALL || k == R_HOME_SHADERS || k == R_HOME_SEARCH || k == R_HOME_SETTINGS || (k >= R_HOME_FOLDERS && k <= R_HOME_ALL);
 }
 
 // ============================================================================ track info panel
@@ -3260,14 +3310,15 @@ void drawLibrary() {
 		case R_DIR: ic = isMusicFolder ? IC_STAR : IC_FOLDER; iconCol = isMusicFolder ? C_ACCENT : folderYellow; break;
 		case R_FILE: case R_TRACK: ic = isPlaying ? IC_PLAY : IC_NOTE; iconCol = textCol = isPlaying ? C_ACCENT : C_WHITE; break;
 		case R_HOME_FOLDERS: ic = IC_FOLDER; iconCol = folderYellow; break;
-		case R_HOME_ALBUMS: case R_ALBUM: ic = IC_ALBUM; iconCol = C_ACCENT; break;
-		case R_HOME_ARTISTS: case R_ARTIST: ic = IC_ARTIST; iconCol = C_ACCENT; break;
-		case R_HOME_GENRES: case R_GENRE: ic = IC_GENRE; iconCol = C_ACCENT; break;
+		case R_HOME_ALBUMS: case R_ALBUM: case R_SMB_ALBUMS: ic = IC_ALBUM; iconCol = C_ACCENT; break;
+		case R_HOME_ARTISTS: case R_ARTIST: case R_SMB_ARTISTS: ic = IC_ARTIST; iconCol = C_ACCENT; break;
+		case R_HOME_GENRES: case R_GENRE: case R_SMB_GENRES: ic = IC_GENRE; iconCol = C_ACCENT; break;
 		case R_HOME_PLAYLISTS: case R_PLAYLIST: ic = IC_PLAYLIST; iconCol = C_ACCENT; break;
-		case R_HOME_NETWORK: ic = IC_FOLDER; iconCol = C_ACCENT; break;
+		case R_HOME_NETWORK: case R_HOME_SMB: ic = IC_FOLDER; iconCol = C_ACCENT; break;
 		case R_NETDIR: ic = IC_FOLDER; iconCol = folderYellow; break;
 		case R_NETSETTINGS: ic = IC_VIZ; iconCol = C_ACCENT; break;
 		case R_NETFIELD: ic = IC_VIZ; iconCol = C_DIM; break;
+		case R_NETSCAN: ic = IC_VIZ; iconCol = smbscan::running() ? C_ACCENT : C_DIM; break;
 		case R_FTPSETTINGS: ic = IC_FOLDER; iconCol = C_ACCENT; break;
 		case R_FTPFIELD: ic = IC_VIZ; iconCol = C_DIM; break;
 		case R_NETCONNECT: ic = IC_PLAY; iconCol = C_ACCENT; textCol = C_ACCENT; break;
@@ -3275,7 +3326,7 @@ void drawLibrary() {
 		case R_USBDRIVE: ic = IC_FOLDER; iconCol = folderYellow; break;
 		case R_USBEJECT: ic = IC_CLOSE; iconCol = textCol = C_DIM; break;
 		case R_NETKEEP: ic = IC_STAR; iconCol = smbnet::keepCache() ? C_ACCENT : C_DIM; break;
-		case R_HOME_ALL: ic = IC_NOTE; iconCol = C_ACCENT; break;
+		case R_HOME_ALL: case R_SMB_ALL: ic = IC_NOTE; iconCol = C_ACCENT; break;
 		case R_HOME_AUTO: ic = IC_VIZ; iconCol = g_autoSecs ? C_ACCENT : C_DIM; break;
 		case R_HOME_SEARCH: ic = IC_NOTE; iconCol = C_ACCENT; break;
 		case R_HOME_HUDTRACK: ic = IC_VIZ; iconCol = player::configInt("hud_on_track", 1) ? C_ACCENT : C_DIM; break;

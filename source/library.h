@@ -48,6 +48,7 @@ int scanDone();
 int scanTotal();
 uint32_t version();                             // increases whenever a new snapshot is published
 std::shared_ptr<const Snapshot> snapshot();
+std::shared_ptr<const Snapshot> makeSnapshot(std::vector<Track> tracks);   // sorts and groups any list of tracks (used for the network library)
 
 // ---- helpers for the menu
 std::string displayTitle(const Track& t);                                      // tag title, else the file name

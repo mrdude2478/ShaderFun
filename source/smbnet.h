@@ -6,6 +6,7 @@
 // Settings live in sdmc:/switch/shaderfun/smb.ini (a template is created the first time you open Network).
 
 #include <stdint.h>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,7 @@ struct Entry {
 	std::string name;
 	bool isDir = false;
 	uint64_t size = 0;
+	int64_t mtime = 0;   // modified time, seconds since 1970 (0 = unknown)
 };
 
 // ---- settings
@@ -44,6 +46,42 @@ bool isRemote(const std::string& path);
 void requestList(const std::string& dir);   // dir = path inside the share ("" = top of the share)
 // true once when a listing has finished (ok=false: 'error' says why)
 bool pollList(std::string& dir, std::vector<Entry>& entries, std::string& error, bool& ok);
+
+// ---- scanning a whole folder tree (asynchronous, lowest priority: it only works while nothing else is waiting for the
+// network, one folder at a time, so playing and browsing are not held up)
+// onDir is called (on the network thread) for every folder with its entries; dir is the path inside the share.
+// onDone is called once at the end: completed = every folder was visited (false: cancelled or the connection failed),
+// folderErrors = how many folders could not be read, message = a problem description (may be empty).
+typedef std::function<void(const std::string& dir, const std::vector<Entry>& entries)> ScanDirFn;
+typedef std::function<void(bool completed, int folderErrors, const std::string& message)> ScanDoneFn;
+bool startTreeScan(const std::string& startDir, ScanDirFn onDir, ScanDoneFn onDone);   // false: a scan is already running
+void cancelTreeScan();
+bool treeScanning();
+
+// ---- a background task (asynchronous, lowest priority like the tree scan, and never at the same time as one)
+// step() runs on the network thread, again and again, as long as nothing more important is waiting for the network;
+// it returns true while there is more to do. done() is called once at the end (cancelled = cancelTask() was used).
+typedef std::function<bool()> TaskStepFn;
+typedef std::function<void(bool cancelled, const std::string& message)> TaskDoneFn;
+bool startTask(TaskStepFn step, TaskDoneFn done);   // false: a task is already running
+void cancelTask();
+bool taskRunning();
+
+// Reading parts of a song on the share. Only for use inside a task step (it runs on the network thread).
+class RemoteFile {
+public:
+	RemoteFile() {}
+	~RemoteFile() { close(); }
+	RemoteFile(const RemoteFile&) = delete;
+	RemoteFile& operator=(const RemoteFile&) = delete;
+	bool open(const std::string& remotePath, uint64_t* sizeOut = nullptr);   // remotePath like "smb://Music/a/b.mp3"
+	bool read(uint64_t offset, size_t length, std::vector<uint8_t>& out);   // fewer bytes at the end of the file
+	void close();
+	std::string error;
+private:
+	void* fh_ = nullptr;
+	int gen_ = 0;
+};
 
 // ---- downloading songs (asynchronous)
 enum FetchState { FETCH_NONE, FETCH_BUSY, FETCH_DONE, FETCH_FAILED };

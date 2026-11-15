@@ -51,6 +51,9 @@ Hold ZR + Right Stick X: Cycle material (Metallic/Chrome/Neon/Matte)
 #include "usbdrive.h"
 #include "shaderpick.h"
 #include "ui.h"
+#include "db.h"
+#include "smbscan.h"
+#include "smblib.h"
 #include "library.h"
 #include "model3d.h"
 
@@ -1469,6 +1472,8 @@ int main(int argc, char* argv[]) {
 	usbdrive::start(); // USB drives in the dock (needs libusbhsfs); fails quietly when it is not available
 	player::init("sdmc:/switch/shaderfun/config.ini");
 	if (audioInitialized) restoreEqualizerSettings(); // (needs the settings player::init just loaded)
+	db::init("sdmc:/switch/shaderfun/library.db"); // the music catalogue (see db.h)
+	smblib::init();                                // loads the network library from it (see smblib.h)
 	library::init("sdmc:/switch/shaderfun/library.idx");
 	library::startScan(player::musicFolder()); // indexes the music folder in the background (cached after the first run)
 	bool plReady = false;
@@ -1544,6 +1549,8 @@ int main(int argc, char* argv[]) {
 		}
 
 		frameCount++;
+
+		smbscan::poll(); // shows a message when the SMB scan has finished
 
 		// Save the state every 20 s, so a crash or a power-off loses very little
 		{
@@ -2009,7 +2016,9 @@ int main(int argc, char* argv[]) {
 	smbnet::abortStreams(); // never wait for network data while the music is being closed
 	player::shutdown();    // also saves the last track, position and queue
 	smbnet::trace("exit: stopping the network");
+	smbscan::cancel();
 	smbnet::shutdown();    // must happen BEFORE ftp_cleanup(): that closes the socket service the SMB connection needs
+	db::shutdown();        // (after the network thread has stopped, which may still hand over rows)
 	lrclib::shutdown();    // same for the online lyrics lookup
 	usbdrive::stop();      // unmounts the drives
 	if (g_nifmReady) nifmExit();

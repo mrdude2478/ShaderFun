@@ -4,6 +4,7 @@
 // Plain file I/O only (no SDL), so it works on any path the C library can open.
 
 #include <stdint.h>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,12 @@ struct TrackTags {
 // and it avoids reading megabytes of artwork per file.
 // wantLyrics = true also fills out.lyrics (not needed for indexing, so off by default).
 bool read(const std::string& path, TrackTags& out, double durationSeconds = 0.0, bool light = false, bool wantLyrics = false);
+
+// The same for a file that is not on the SD card: only the size and a function that can read any part of the file are
+// needed (fetch(offset, buffer, length) returns false when that part can not be read). fileName is only used for its extension.
+// Always "light": text tags only.
+bool readRemote(const std::string& fileName, uint64_t fileSize, const std::function<bool(uint64_t, void*, size_t)>& fetch,
+	TrackTags& out, double durationSeconds = 0.0);
 
 // exposed for tests
 std::string base64Decode(const std::string& in, std::vector<uint8_t>& out);
