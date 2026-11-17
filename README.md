@@ -20,7 +20,12 @@ file straight to your switch, press down on the left stick and your new shader s
 💾 Remembers Where You Were: last song and position, queue, shader, image and 3D model\
 🧊 3D Models: show textured OBJ models in your shaders, with a separate skin image if you like\
 🌐 Network Music: browse and stream songs from an SMB share (router with a USB drive, NAS, PC), set up with the on-screen keyboard\
-💽 USB Drives: play music from a USB drive in the dock (FAT, exFAT, NTFS, EXT)
+💽 USB Drives: play music from a USB drive in the dock (FAT, exFAT, NTFS, EXT)\
+🗄️ Music Database: one SQLite file (`library.db`) keeps your whole catalogue - SD card, network share and USB drives - and you can open it on a PC too\
+📚 Network & USB Libraries: scan a share or a drive once, then browse, search and make playlists from it, even while it is not connected\
+🔎 Search: songs, albums and artists, across everything that is connected\
+🎚️ Equalizer: 10 bands with presets\
+✨ Smooth Shader Changes: the next shader is prepared in the background and faded in
 
 ## Installation
 Download the latest release from the Releases page\
@@ -36,7 +41,12 @@ sdmc:/switch/shaderfun/\
 ├── smb.ini         # Created automatically: your network share details (see Network music)\
 ├── smb.log         # Created automatically: a small log of network activity, restarted on every run\
 ├── config.ini      # Created automatically (music folder, volume, play mode, last song/shader, sleep timer options...)\
-├── library.idx     # Created automatically: cache of your music tags\
+├── library.db      # Created automatically: your music catalogue (SD card, network share, USB drives), see Music database\
+├── library.idx     # Old cache of your music tags: read once to fill the database, and only used if the database can't be opened\
+├── smbscan.log     # Created automatically: when each network share scan started and ended\
+├── usbscan.log     # Created automatically: the same for USB drive scans\
+├── lyrics/         # Created automatically: lyrics found online, kept so a song is only looked up once\
+├── ftp_config.txt  # Created automatically: FTP port, user name and password (change them in Settings)\
 ├── last_queue.txt  # Created automatically: the queue you chose, restored on the next start\
 ├── scroller.txt    # Optional: your own scroller message\
 ├── shaders/        # Put your .frag/.glsl shaders here\
@@ -50,9 +60,12 @@ Overlay: title / artist, progress bar, play-pause, previous/next, rewind/forward
 Touch: tap the buttons, drag the progress bar to seek, drag the volume slider, tap the mode icon to change repeat/shuffle.
 
 **Library** (press Y or tap the Library button): a panel slides in from the left while the shader keeps running behind it.\
-It opens on a menu: **Folders**, **Albums**, **Artists**, **Genres**, **Playlists**, **Network**, **USB drive**, **All songs** and **Rescan library**.\
+It opens on a menu: **Search**, **Folders**, **Albums**, **Artists**, **Genres**, **Playlists**, **All songs**, **Network**, **Network library**, **USB library**, **USB drive**, **Settings** and **Rescan library**.\
+**Albums**, **Artists**, **Genres**, **All songs** and **Search** show your SD card music together with whatever is connected right now: the network share (when it can be reached)\
+and every USB drive that is plugged in. Music from a source that is away disappears from these pages and comes back with the source. A song that exists in more than one place\
+(same artist, album, title and track number) is listed once. **Network library** and **USB library** show everything that has been scanned, connected or not (see below).\
 Albums, artists and genres come from the tags of your music files. The first time, the music folder is read in the background\
-(the menu shows the progress) and cached in `sdmc:/switch/shaderfun/library.idx`, so later starts only look at new or changed files.\
+(the menu shows the progress) and stored in the music database `sdmc:/switch/shaderfun/library.db`, so later starts only look at new or changed files.\
 Untagged files are grouped by folder name. Two albums with the same name by different artists stay separate, and albums with an\
 album-artist tag (compilations) stay together.\
 Pick a track to play it and queue the rest of that album/list, or use "Play album" / "Play all" at the top of a page.\
@@ -67,8 +80,8 @@ Right stick right / left: jump to the next / previous first letter (A, B, C ...)
 L3 (left stick press): add the highlighted item to the end of the queue\
 R3 (right stick press): add the highlighted item to a playlist (see below)
 
-The menu page also has **Sleep timer**, **Resume on launch** and **Auto-change visualisation** rows (see below).\
-**Network** and **USB drive** open music that is not on the SD card (see *Network music* and *USB drives* below).
+**Settings** holds the sleep timer, equalizer, online lyrics, shader options, FTP details and more (see *Settings* below).\
+**Network**, **Network library**, **USB drive** and **USB library** open music that is not on the SD card (see *Network music*, *Network library*, *USB drives* and *USB library* below).
 
 Play modes (R3 with the library closed, or the overlay icon): Repeat all, Shuffle, Repeat one, Play once.
 
@@ -85,10 +98,58 @@ The queue the player fills by itself at start-up is not included.
 
 **Open a playlist** to play it, and to use **Rename this playlist** (keyboard) or **Delete this playlist** (press A twice to confirm).\
 The Playlists count on the menu page updates as you add or delete. Playlists are plain `.m3u` files, so you can also edit them over FTP.\
-Songs from a network share or a USB drive can't be added to playlists (their paths can change between runs).
+Songs from the network share and from USB drives can be added too. A network song is stored as `smb://<path inside the share>`, and a USB song as `usb://<drive id>/<path>`,\
+so a playlist still works when a drive gets a different slot. Network and USB songs can only be played while their share or drive is available.\
+The **Network library** and each drive in the **USB library** have a **Playlists** page that lists only the playlists containing their songs.
+
+## Search
+**Search** (top of the library menu) opens the Switch keyboard. Songs, albums and artists that match are listed, with **Play all** for the songs and **Search again** to change the words.\
+Every word you type has to match somewhere (title, artist, album or other details), in any order, and ignoring capitals and accents. A match in the title ranks above one in the artist, then the album.\
+The main **Search** covers the SD card plus everything connected. The **Network library** and each drive in the **USB library** have their own **Search** that covers only that source, also when it is not connected.
+
+## Settings
+Library menu, **Settings**. Press A on a row to change it.\
+**Sleep timer** and **When the sleep timer ends**: see *Sleep timer*.\
+**Equalizer**: see *Equalizer*.\
+**Online lyrics**: look up missing lyrics on lrclib.net (see *Lyrics*).\
+**Resume on launch**: *starts paused* or *keeps playing* (see *Remembering where you were*).\
+**Auto-change visualisation**: how often the shader changes by itself (see *Auto-change visualisation*).\
+**Shaders**, **Shader list**, **Shader order**: choose favourite shaders (A on a shader marks it, X shows it), whether the automatic change uses all shaders or only favourites, and *in order* or *random*.\
+**FTP server**: the FTP **Port**, **User name** and **Password**, typed with the Switch keyboard and saved in `ftp_config.txt`. User name and password apply to the next login; a new port applies the next time the server is started.\
+**Show shader name when it changes**: a short message with the shader's name.\
+**Smooth shader changes**: see *Smooth shader changes*.\
+**Show player when a new track starts**: turn off to keep the player overlay hidden when the next track of an album or playlist starts by itself (pressing a button still shows it).\
+**Hide network library when Wi-Fi is off**: also hide the Network library row on the menu while Wi-Fi is off (off by default).
+
+## Equalizer
+Settings, **Equalizer**: switch it on or off, pick a **Preset** (Flat, Bass boost, Less bass, Treble boost, Vocal, Loudness, Rock, Pop and more), or set the ten bands (31 Hz to 16 kHz, -12 to +12 dB)\
+with left/right or by dragging on the touch screen. The volume is lowered automatically when you boost a lot, to avoid distortion. Your settings are saved and restored on the next start.
+
+## Music database
+Your whole music catalogue is kept in one SQLite file, `sdmc:/switch/shaderfun/library.db`. The app uses it for the SD card library (replacing the old `library.idx`), the scanned network share and scanned USB drives.\
+The database can always be rebuilt by scanning again, so deleting it is safe: your playlists, settings and music are not stored in it. Playlists stay `.m3u` files and settings stay in `config.ini`.
+
+**Using it on a PC:** copy `library.db` off the SD card (for example with the app's FTP server) and open the copy with any SQLite program (for example SQLite Expert or DB Browser for SQLite). Only read the copy, and don't open the\
+file on the card while the app is running: the Switch version has no file locking. The schema version is stored in `PRAGMA user_version` (currently 2); if a newer app changes it, an older database is upgraded when the app starts.
+
+Table `tracks` (one row per song):\
+`source` (`sd`, `smb` or `usb`), `drive_id` (usb only), `path`, `folder`, `filename`, `ext`, `size`, `mtime` (seconds since 1970),\
+`tags_state` (0 = tags not read yet, 1 = read, 2 = the file has no tags), `title`, `artist`, `album`, `albumartist`, `genre`, `year`, `trackno`, `discno`,\
+`format`, `bitrate`, `samplerate`, `channels` (network and USB songs only), `first_seen`, `last_seen`, `scan_id`.\
+Paths: SD songs are `sdmc:/...`; network songs are `smb://` plus the path inside the share (the share name is not part of it: a Windows program can turn it into `\\server\share\...`); USB songs are `usb://<drive id>/...`.\
+Table `drives`: `id`, `label`, `maker`, `product`, `fs_type`, `capacity`, `first_seen`, `last_seen`, `last_scan`, `songs`.\
+Table `meta`: small notes such as `smb_last_scan` and `smb_last_scan_files`.
+
+A few examples:
+```
+SELECT source, COUNT(*) FROM tracks GROUP BY source;
+SELECT artist, album, COUNT(*) FROM tracks WHERE album IS NOT NULL GROUP BY artist, album ORDER BY artist, album;
+SELECT path FROM tracks WHERE tags_state <> 1;                                   -- songs without tags
+SELECT artist, title, COUNT(*) FROM tracks GROUP BY artist, title HAVING COUNT(*) > 1;   -- the same song twice
+```
 
 ## Sleep timer
-Library menu page, **Sleep timer**: press A to cycle Off, 15, 30, 45, 60, 90 minutes or *after this track*.\
+Library menu, **Settings**, **Sleep timer**: press A to cycle Off, 15, 30, 45, 60, 90 minutes or *after this track*.\
 The volume fades out over the last 15 seconds and the music pauses (so the position is kept). While a timer runs, the menu shows\
 **When the sleep timer ends** (*close the app* or *pause only*) and the player overlay shows the countdown. With *close the app*, the app\
 closes 5 seconds after the music pauses (press any button in that time to stay). The Switch may then sleep by itself, following the auto-sleep\
@@ -97,7 +158,7 @@ setting in System Settings. The timer is not remembered between launches.
 ## Remembering where you were
 On exit (and every 20 seconds while running) the app saves your last song and position, the queue you chose, play mode, volume and the\
 current shader, image, 3D model, material and scroller state. On the next start the song is loaded at its old position, paused.\
-Library menu page, **Resume on launch**, switches this to *keeps playing*. Delete `config.ini` / `last_queue.txt` to reset.
+Library menu, **Settings**, **Resume on launch**, switches this to *keeps playing*. Delete `config.ini` / `last_queue.txt` to reset.
 
 ## Network music (SMB)
 Play music straight from a shared folder on your network: a router with a USB drive plugged in, a NAS or a PC.\
@@ -118,8 +179,24 @@ A `.lrc` file next to a song on the share is fetched with it, so lyrics work for
 **The cache:** downloads go to `sdmc:/switch/shaderfun/cache/` and are only temporary. Only the song playing and the next one are kept, and the folder is emptied when the app\
 starts and when it exits. In **Network settings**, **Keep downloaded songs on exit** keeps them instead, so the last song is ready straight away next time.
 
-**Limits:** network songs are not part of Albums, Artists and Genres, and can't be added to playlists. The password is stored as plain text in `smb.ini`.\
+**Limits:** the password is stored as plain text in `smb.ini`. Network songs show up in Albums, Artists, Genres, All songs and Search only after the share has been scanned (see *Network library*).\
 `smb.log` records what the network code is doing (connections, downloads, errors) and is restarted every run. It never contains your password.
+
+## Network library
+Scanning the share once puts all its songs, with their tags, into the music database, so you can browse and search them quickly and even while the share is away.\
+In **Network settings** choose **Scan the share into the database**. It runs in the background in two steps and a message appears when it is done:\
+1. **Files:** every music file in the share (below the *Start folder*) is listed with its path, size and date. Songs that have been removed are dropped from the database, but only after a scan that could read every folder.\
+2. **Tags:** the start of every new or changed song is read over the network and its tags (title, artist, album, album artist, genre, year, track and disc number, format) are stored. This is the slow part:\
+about 0.1 seconds per song, so a first scan of 13,000 songs takes around half an hour. Later scans only read new or changed songs. You can stop it from the same row and it carries on where it left off.\
+The scan only uses the network while nothing else needs it, so playing and browsing are not held up. `smbscan.log` records when each scan started and ended, and how many songs it found.
+
+The **Network library** row on the menu opens **Search**, **Albums**, **Artists**, **Genres**, **All songs** and **Playlists** for the scanned share. Songs without readable tags are listed by their file and folder names.\
+The row is hidden until a share is set up and scanned. It says *Wi-Fi off, browse only* or *share not reachable, browse only* when playing is not possible.\
+Settings has **Hide network library when Wi-Fi is off** if you would rather not see it at all in that case.
+
+**Is the share reachable?** A small check runs in the background (using the same connection as browsing) and decides whether the network songs belong in the main menu pages. For the first 15 seconds after the app starts it makes\
+no decision, so the menu is complete while Wi-Fi and the share come up. Later, if the share stops answering, a message appears and its songs leave Albums, Artists, Genres, All songs and Search; when it\
+answers again they come back and the open page refreshes itself.
 
 ## USB drives (docked)
 Plug a USB drive into the dock and open library menu, **USB drive**. Each drive is listed with its name (the volume label if it has one), its file system and its size.\
@@ -128,8 +205,19 @@ FAT12/16/32, exFAT, NTFS and EXT2/3/4 drives are supported. Drives are mounted r
 A message appears when a drive is connected or removed. Use **Safely remove** on the USB page before unplugging (it stops playback from that drive first).\
 If you unplug a drive while browsing it, you are taken back to the menu.
 
-**Limits:** USB drives only work with the dock (not handheld). A folder on a drive can't be your music folder, USB music is not part of Albums, Artists and Genres, songs from it\
-can't be added to playlists, and a song from a drive is not restored when the app starts (the drive is not mounted yet). If the row says *not available*, the USB service could not start.
+**Limits:** USB drives only work with the dock (not handheld). A folder on a drive can't be your music folder, and a song from a drive is not restored when the app starts (the drive is not mounted yet).\
+If the row says *not available*, the USB service could not start.
+
+## USB library
+On the **USB drive** page, each drive has **Scan <name> into the database**. A drive is read like a local folder, so its tags are read straight away; a scan of a few thousand songs takes a minute or two.\
+Files that did not change are not read again, and songs that were removed are dropped after a scan that visited every folder. `usbscan.log` records each scan.
+
+**How a drive is recognised:** by an id made from its volume label, maker, product, file system and size (not its serial number, which not every drive can report). Renaming a drive in Windows therefore makes it a new drive.\
+Song paths in the database look like `usb://<drive id>/Music/Album/01 Song.mp3`, so they stay valid whichever slot (`ums0:`, `ums1:`...) the system gives the drive. They are turned into the current slot when you play.
+
+The **USB library** row (shown once a drive has been scanned) lists every scanned drive, with *connected* or *not connected*. Each drive has **Search**, **Albums**, **Artists**, **Genres**, **All songs** and **Playlists**,\
+and you can browse them while the drive is unplugged. Playing needs the drive; if it is missing a message says so. **Forget this drive** (press A twice) removes a drive and its songs from the database; scanning it again brings it back.\
+USB music of drives that are plugged in also appears in the main Albums, Artists, Genres, All songs and Search pages.
 
 ## Lyrics
 With the library closed, push the **right stick right** to show lyrics and **left** to hide them. They stay on for the next songs and hide\
@@ -145,6 +233,9 @@ Supported in `.lrc` files: several timestamps on one line, `[offset:ms]`, enhanc
 and `M:` / `F:` / `D:` at the start of a line (male light blue, female pink, duet violet). A line without a marker keeps the previous singer's colour;\
 this is `kSingerSticks` in `lyrics.cpp` (set it to `false` to show unmarked lines in the normal colours). Files can be UTF-8, UTF-16 or Latin-1.\
 Colours, the box and the font size can be changed in `ui.cpp` (`LYR_CURRENT`, `LYR_NEXT`, `lyricsSingerColor()`, `FONT_PT`).
+
+**Online lyrics:** in **Settings**, **Online lyrics** can look up lyrics on [lrclib.net](https://lrclib.net) (free, no account) for songs that have no `.lrc` file and no embedded lyrics.\
+It needs Wi-Fi and is off by default. Lyrics that are found are kept in `sdmc:/switch/shaderfun/lyrics/`, so a song is only looked up once.
 
 **Track info** (L3, or tap the title / the (i) chip): a panel on the right shows the embedded cover art, title, artist, album,\
 album artist, composer, track and disc number, year, genre and comment, plus format, bitrate, sample rate, channels, length, size and path.\
@@ -194,8 +285,14 @@ Docking or undocking switches the list immediately; if the shader you were watch
 ## Auto-change visualisation
 The visualisation can change by itself. Tap the small equaliser-bars icon on the player overlay (next to the (i) chip) to cycle\
 Off, 30 s, 45 s, 60 s and 2 min; the chosen interval is shown beside it. It can also be set from the controller: open the library (Y),\
-go to the menu (L) and press A on **Auto-change visualisation**. When enabled, the next shader (in list order) starts after the time you set;\
+go to the menu (L), open **Settings** and press A on **Auto-change visualisation**. When enabled, the next shader (in list order) starts after the time you set;\
 when off, it stays on the current one. Switching shaders yourself with L/R restarts the countdown. The setting is saved in `config.ini`.
+
+## Smooth shader changes
+Complex shaders can take a moment to compile, which used to freeze the picture before a change. While a shader plays, the app prepares the **next** and the **previous** shader in the background (a little at a time),\
+so L/R only swap in a shader that is already compiled. The **automatic** change takes the prepared next shader and cross-fades to it over one second.\
+Switching with L/R and picking a shader on the Shaders page stay instant. During the fade both shaders are drawn, so very heavy shaders may run slower for that second, especially handheld.\
+Turn it off with Settings, **Smooth shader changes**. (A shader is compiled by the driver every time: the Switch's graphics driver can't save compiled shaders, so they can't be cached on the SD card.)
 
 ## Shader Controls
 L/R Buttons: Previous/Next Shader\
@@ -205,7 +302,7 @@ New, removed and changed shader files are picked up automatically (no rescan but
 
 ## System Controls
 Plus Button: Exit Application\
-Minus Button: Start/Stop FTP Server
+Minus Button: Start/Stop FTP Server (starting needs Wi-Fi: a message says so if it is off; a message also shows when the server starts or stops)
 
 ## Audio
 Supported Audio Formats\
@@ -257,7 +354,7 @@ FTP port: 5000\
 FTP username: switch\
 FTP password: ftp123\
 
-Note: These can be changed by a program generated file, "sdmc:/switch/shaderfun/ftp_config.txt"\
+These can be changed in the app (Library menu, **Settings**, **FTP server**, typed with the Switch keyboard) or in the file "sdmc:/switch/shaderfun/ftp_config.txt"\
 A custom FTP MOTD can be loaded from a file, "sdmc:/switch/shaderfun/ftp_motd.txt"
 
 ## LED indicators (On Switch controller):
@@ -291,7 +388,7 @@ OpenGL ES 2.0\
 The SDL2 libraries come from devkitPro's package manager (the codec libraries SDL2_mixer needs are installed with it):\
 `pacman -S switch-sdl2 switch-sdl2_mixer switch-sdl2_image switch-sdl2_ttf`\
 (`pacman -Qi switch-sdl2_mixer` shows which SDL2_mixer version you have; use `dkp-pacman` if that is what your install calls it.)
-libsmb2 (network music) and libusbhsfs, GPL build (USB drives): see below
+libsmb2 (network music), libusbhsfs, GPL build (USB drives) and SQLite (music database): see below
 
 **libsmb2** (SMB client):\
 `git clone https://github.com/sahlberg/libsmb2.git`\
@@ -305,6 +402,16 @@ The changes make more drives mount, and add a `volume_label` field to `UsbHsFsDe
 `pacman -S switch-ntfs-3g switch-lwext4`\
 `cd libusbhsfs`\
 `make BUILD_TYPE=GPL install`
+
+**SQLite** (music database): there is no devkitPro package, so build the SQLite amalgamation (`sqlite3.c` and `sqlite3.h` from [sqlite.org/download.html](https://sqlite.org/download.html); version 3.54.1 was used) yourself:\
+```
+aarch64-none-elf-gcc -O2 -c sqlite3.c -o sqlite3.o \
+  -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffunction-sections -fdata-sections -D__SWITCH__ \
+  -DSQLITE_OS_OTHER=1 -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_WAL -DSQLITE_TEMP_STORE=2
+aarch64-none-elf-ar rcs libsqlite3.a sqlite3.o
+```
+Copy `libsqlite3.a` to `$DEVKITPRO/portlibs/switch/lib` and `sqlite3.h` to `$DEVKITPRO/portlibs/switch/include`. `-DSQLITE_OS_OTHER=1` leaves out SQLite's own file code: ShaderFun provides it (`sqlite_vfs.cpp`).\
+The library is built single-threaded (`SQLITE_THREADSAFE=0`), so the app only uses the database from one thread (`db.cpp`). `-fPIE` is needed, or the link fails with *read-only segment has dynamic relocations*.
 
 ### Optional: building SDL2_mixer 2.8.1 yourself
 The package from `pacman` is enough to build ShaderFun. The author runs SDL2_mixer 2.8.1 built from source, which is only needed if you want a newer version than the package.\
@@ -363,7 +470,16 @@ USB drive not showing:\
 Use the dock (USB host mode does not work handheld)\
 Wait a few seconds after plugging it in. If the USB row says *not available*, the USB service could not start\
 
+Network songs missing from the menu:\
+Scan the share first (Network settings, **Scan the share into the database**) and wait for the message that it has finished\
+If the share is switched off or Wi-Fi is off, its songs leave Albums, Artists, Genres, All songs and Search: use the **Network library** row to browse them\
+`smbscan.log` and `smb.log` in `sdmc:/switch/shaderfun/` show what happened\
+
+USB drive missing from the USB library:\
+Scan the drive first (USB drive page, **Scan ... into the database**). A drive you renamed is a new drive: use **Forget this drive** on the old entry\
+
 FTP Server Issues:\
+If Minus only shows a Wi-Fi message, switch Wi-Fi on first\
 Verify network connection\
 Check firewall settings\
 Ensure sufficient free memory
@@ -374,6 +490,8 @@ SDL2 - Cross-platform development library\
 SDL2_mixer - Audio mixing library\
 [libsmb2](https://github.com/sahlberg/libsmb2) - SMB2/3 client library (LGPL 2.1)\
 [libusbhsfs](https://github.com/DarkMatterCore/libusbhsfs) - USB mass storage support (GPL build, modified copy included in the `libusbhsfs` folder), with NTFS-3G and lwext4\
+[SQLite](https://sqlite.org) - the music database (public domain)\
+[lrclib.net](https://lrclib.net) - free online lyrics\
 DejaVu Sans - UI font (see DejaVu-LICENSE.txt)\
 Switch Homebrew Community\
 [Mod Archive](https://modarchive.org/)

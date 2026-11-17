@@ -1,7 +1,7 @@
 // Voodoo Lights: Ultimate Edition
 // Starfield + Volumetric Clouds + 2 Double-Helix Orbs.
 // Converted for ShaderFun (Nintendo Switch, GLSL ES 2.0)
-
+//!scroller off
 precision mediump float;
 
 uniform vec3  iResolution;

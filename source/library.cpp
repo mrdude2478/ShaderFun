@@ -1,4 +1,5 @@
 #include "library.h"
+#include "db.h"
 
 #include "player.h"
 #include "tags.h"
@@ -13,6 +14,11 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+
+#include <sqlite3.h>
+#include <time.h>
+#include <memory>
+#include <unordered_set>
 
 namespace library {
 
@@ -193,7 +199,7 @@ std::string clean(const std::string& s) {
 	return o;
 }
 
-void saveCache(const std::string& root, const std::vector<Track>& tracks) {
+void saveCacheFile(const std::string& root, const std::vector<Track>& tracks) {
 	if (g_cachePath.empty()) return;
 	std::ofstream f(g_cachePath);
 	if (!f.is_open()) return;
@@ -206,7 +212,7 @@ void saveCache(const std::string& root, const std::vector<Track>& tracks) {
 	}
 }
 
-bool loadCache(const std::string& root, std::unordered_map<std::string, Track>& out) {
+bool loadCacheFile(const std::string& root, std::unordered_map<std::string, Track>& out) {
 	std::ifstream f(g_cachePath);
 	if (!f.is_open()) return false;
 	std::string line;
@@ -232,6 +238,113 @@ bool loadCache(const std::string& root, std::unordered_map<std::string, Track>& 
 		out[t.path] = std::move(t);
 	}
 	return true;
+}
+
+// ------------------------------------------------------------------ the database (db.h): where the SD card library is kept
+// Rows with source = 'sd'. The file cache above is only used when the database is not available, and once to take over an old index.
+std::string rootPrefix(const std::string& root) { // "sdmc:/music" -> "sdmc:/music/": every file of this music folder starts with it
+	std::string p = root;
+	while (!p.empty() && p.back() == '/') p.pop_back();
+	return p + "/";
+}
+
+std::string colText(sqlite3_stmt* st, int i) {
+	const unsigned char* t = sqlite3_column_text(st, i);
+	return t ? std::string((const char*)t) : std::string();
+}
+
+bool loadCacheDb(const std::string& root, std::unordered_map<std::string, Track>& out) {
+	const std::string prefix = rootPrefix(root);
+	return db::call([&out, &prefix](sqlite3* d) {
+		sqlite3_stmt* st = nullptr;
+		if (sqlite3_prepare_v2(d, "SELECT path,size,mtime,title,artist,album,albumartist,genre,year,trackno,discno FROM tracks "
+			"WHERE source='sd' AND substr(path,1,length(?1))=?1;", -1, &st, nullptr) != SQLITE_OK) return;
+		sqlite3_bind_text(st, 1, prefix.c_str(), -1, SQLITE_STATIC);
+		while (sqlite3_step(st) == SQLITE_ROW) {
+			Track t;
+			t.path = colText(st, 0);
+			t.size = (uint64_t)sqlite3_column_int64(st, 1);
+			t.mtime = (int64_t)sqlite3_column_int64(st, 2);
+			t.title = colText(st, 3); t.artist = colText(st, 4); t.album = colText(st, 5);
+			t.albumArtist = colText(st, 6); t.genre = colText(st, 7); t.year = colText(st, 8);
+			t.trackNo = sqlite3_column_int(st, 9);
+			t.discNo = sqlite3_column_int(st, 10);
+			out[t.path] = std::move(t);
+		}
+		sqlite3_finalize(st);
+	});
+}
+
+void bindOptText(sqlite3_stmt* st, int i, const std::string& v) {
+	if (v.empty()) sqlite3_bind_null(st, i); else sqlite3_bind_text(st, i, v.c_str(), -1, SQLITE_TRANSIENT);
+}
+void bindOptInt(sqlite3_stmt* st, int i, int v) {
+	if (v <= 0) sqlite3_bind_null(st, i); else sqlite3_bind_int(st, i, v);
+}
+
+// Writes what changed: new / changed songs are inserted or updated, songs that are gone are deleted, and rows of any other
+// music folder are removed. (The database thread does this later; the scan does not wait for it.)
+void saveToDb(const std::string& root, std::vector<Track> changed, std::vector<std::string> gone) {
+	const std::string prefix = rootPrefix(root);
+	std::shared_ptr<std::vector<Track>> tracks = std::make_shared<std::vector<Track>>(std::move(changed));
+	std::shared_ptr<std::vector<std::string>> removed = std::make_shared<std::vector<std::string>>(std::move(gone));
+	db::post([prefix, tracks, removed](sqlite3* d) {
+		const sqlite3_int64 now = (sqlite3_int64)time(NULL);
+		sqlite3_stmt* up = nullptr;
+		sqlite3_stmt* del = nullptr;
+		const char* upSql =
+			"INSERT INTO tracks(source,path,folder,filename,ext,size,mtime,tags_state,title,artist,album,albumartist,genre,year,trackno,discno,first_seen,last_seen) "
+			"VALUES('sd',?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?16) "
+			"ON CONFLICT(source,path) DO UPDATE SET folder=excluded.folder, filename=excluded.filename, ext=excluded.ext, size=excluded.size,"
+			" mtime=excluded.mtime, tags_state=excluded.tags_state, title=excluded.title, artist=excluded.artist, album=excluded.album,"
+			" albumartist=excluded.albumartist, genre=excluded.genre, year=excluded.year, trackno=excluded.trackno, discno=excluded.discno,"
+			" last_seen=excluded.last_seen;";
+		if (sqlite3_prepare_v2(d, upSql, -1, &up, nullptr) != SQLITE_OK) { printf("Library: database prepare failed: %s\n", sqlite3_errmsg(d)); return; }
+		sqlite3_prepare_v2(d, "DELETE FROM tracks WHERE source='sd' AND path=?1;", -1, &del, nullptr);
+		db::exec(d, "BEGIN;");
+		for (const Track& t : *tracks) {
+			const size_t slash = t.path.rfind('/');
+			const std::string folder = slash == std::string::npos ? std::string() : t.path.substr(0, slash);
+			const std::string file = slash == std::string::npos ? t.path : t.path.substr(slash + 1);
+			const size_t dot = file.rfind('.');
+			std::string ext = dot == std::string::npos ? std::string() : file.substr(dot);
+			for (char& ch : ext) if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+			sqlite3_bind_text(up, 1, t.path.c_str(), -1, SQLITE_STATIC);
+			sqlite3_bind_text(up, 2, folder.c_str(), -1, SQLITE_TRANSIENT);
+			sqlite3_bind_text(up, 3, file.c_str(), -1, SQLITE_TRANSIENT);
+			sqlite3_bind_text(up, 4, ext.c_str(), -1, SQLITE_TRANSIENT);
+			sqlite3_bind_int64(up, 5, (sqlite3_int64)t.size);
+			sqlite3_bind_int64(up, 6, (sqlite3_int64)t.mtime);
+			sqlite3_bind_int(up, 7, (!t.title.empty() || !t.artist.empty() || !t.album.empty()) ? 1 : 2);
+			bindOptText(up, 8, t.title);
+			bindOptText(up, 9, t.artist);
+			bindOptText(up, 10, t.album);
+			bindOptText(up, 11, t.albumArtist);
+			bindOptText(up, 12, t.genre);
+			bindOptText(up, 13, t.year);
+			bindOptInt(up, 14, t.trackNo);
+			bindOptInt(up, 15, t.discNo);
+			sqlite3_bind_int64(up, 16, now);
+			if (sqlite3_step(up) != SQLITE_DONE) printf("Library: database insert failed: %s\n", sqlite3_errmsg(d));
+			sqlite3_reset(up);
+		}
+		if (del) {
+			for (const std::string& p : *removed) {
+				sqlite3_bind_text(del, 1, p.c_str(), -1, SQLITE_STATIC);
+				sqlite3_step(del);
+				sqlite3_reset(del);
+			}
+		}
+		sqlite3_stmt* other = nullptr;
+		if (sqlite3_prepare_v2(d, "DELETE FROM tracks WHERE source='sd' AND substr(path,1,length(?1))<>?1;", -1, &other, nullptr) == SQLITE_OK) {
+			sqlite3_bind_text(other, 1, prefix.c_str(), -1, SQLITE_STATIC);
+			sqlite3_step(other);
+			sqlite3_finalize(other);
+		}
+		db::exec(d, "COMMIT;");
+		sqlite3_finalize(up);
+		if (del) sqlite3_finalize(del);
+	});
 }
 
 // ------------------------------------------------------------------ scanning
@@ -292,7 +405,15 @@ int scanThread(void*) {
 	SDL_AtomicSet(&g_total, 0);
 
 	std::unordered_map<std::string, Track> cache;
-	const bool haveCache = loadCache(root, cache) && !cache.empty();
+	const bool useDb = db::ready(); // the SD card library lives in the database (library.idx is the fallback when there is none)
+	bool haveCache = false;
+	bool importOld = false;         // first run with the database: the old index file is taken over
+	if (useDb) {
+		loadCacheDb(root, cache);
+		haveCache = !cache.empty();
+		if (!haveCache && loadCacheFile(root, cache) && !cache.empty()) { haveCache = true; importOld = true; }
+	}
+	else haveCache = loadCacheFile(root, cache) && !cache.empty();
 	if (haveCache) { // show the cached library straight away
 		std::vector<Track> early;
 		early.reserve(cache.size());
@@ -305,6 +426,7 @@ int scanThread(void*) {
 	SDL_AtomicSet(&g_total, (int)files.size());
 
 	std::vector<Track> out;
+	std::vector<Track> changedTracks; // new or changed: these are written to the database
 	out.reserve(files.size());
 	size_t changed = 0;
 	Uint32 lastPublish = SDL_GetTicks();
@@ -316,7 +438,9 @@ int scanThread(void*) {
 			out.push_back(it->second);
 		}
 		else {
-			out.push_back(trackFromTags(fi));
+			Track nt = trackFromTags(fi);
+			if (useDb) changedTracks.push_back(nt);
+			out.push_back(std::move(nt));
 			changed++;
 			SDL_Delay(1); // give the SD card to the audio decoder now and then
 		}
@@ -328,7 +452,16 @@ int scanThread(void*) {
 		}
 	}
 	publish(out);
-	if (changed > 0 || cache.size() != out.size() || !haveCache) saveCache(root, out);
+	if (useDb) {
+		std::vector<std::string> gone; // in the database, but no longer in the folder
+		std::unordered_set<std::string> present;
+		present.reserve(out.size());
+		for (const Track& t : out) present.insert(t.path);
+		for (const auto& kv : cache) if (!present.count(kv.first)) gone.push_back(kv.first);
+		if (importOld) saveToDb(root, out, std::move(gone));                    // everything from the old index file
+		else if (!changedTracks.empty() || !gone.empty() || !haveCache) saveToDb(root, std::move(changedTracks), std::move(gone));
+	}
+	else if (changed > 0 || cache.size() != out.size() || !haveCache) saveCacheFile(root, out);
 	printf("Library: %zu tracks (%zu read, %zu from cache)\n", out.size(), changed, out.size() - changed);
 	SDL_AtomicSet(&g_scanning, 0);
 	return 0;
@@ -438,6 +571,7 @@ std::string normalizePath(const std::string& p) {
 }
 
 std::string resolveEntry(const std::string& playlistDir, std::string e) {
+	if (e.compare(0, 6, "smb://") == 0 || e.compare(0, 6, "usb://") == 0) return e; // a song on the network share / a USB drive: kept exactly as written
 	for (char& c : e) if (c == '\\') c = '/';
 	if (e.compare(0, 4, "http") == 0 || e.compare(0, 7, "file://") == 0) return "";
 	const size_t colon = e.find(':');
@@ -498,8 +632,10 @@ std::vector<std::string> loadPlaylist(const std::string& path) {
 		if (line.empty() || line[0] == '#') continue;
 		const std::string full = resolveEntry(dir, line);
 		if (full.empty() || !player::isMusicFile(player::baseName(full))) continue;
-		struct stat st;
-		if (stat(full.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) continue; // missing files are skipped
+		if (full.compare(0, 6, "smb://") != 0 && full.compare(0, 6, "usb://") != 0) { // network / USB songs are not checked here (the share or drive may be away)
+			struct stat st;
+			if (stat(full.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) continue; // missing files are skipped
+		}
 		out.push_back(full);
 	}
 	return out;
@@ -516,6 +652,19 @@ void ensureDir(const std::string& dir) {
 	}
 }
 } // namespace
+
+bool playlistHasPrefix(const std::string& path, const std::string& prefix) {
+	std::ifstream f(path);
+	std::string line;
+	while (std::getline(f, line)) {
+		size_t a = 0;
+		while (a < line.size() && (line[a] == ' ' || line[a] == '\t' || (uint8_t)line[a] >= 0x80)) a++; // (also skips a UTF-8 byte order mark)
+		if (line.compare(a, prefix.size(), prefix) == 0) return true;
+	}
+	return false;
+}
+
+bool playlistHasNetwork(const std::string& path) { return playlistHasPrefix(path, "smb://"); }
 
 bool savePlaylist(const std::string& path, const std::vector<std::string>& tracks) {
 	ensureDir(player::parentPath(path));

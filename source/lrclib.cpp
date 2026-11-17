@@ -406,6 +406,13 @@ bool cachedForSong(const std::string& songPath, std::string& text) {
 	return true;
 }
 
+std::string cacheFileForSong(const std::string& songPath) {
+	std::string artist, title, album;
+	if (!songInfo(songPath, artist, title, album)) return "";
+	const std::string p = cacheBase(artist, title) + ".lrc";
+	return fileExists(p) ? p : std::string();
+}
+
 void request(const std::string& songPath, double durationSeconds) {
 	if (!g_mu) { g_mu = SDL_CreateMutex(); g_cv = SDL_CreateCond(); }
 	SDL_LockMutex(g_mu);

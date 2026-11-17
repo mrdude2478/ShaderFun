@@ -17,6 +17,7 @@ struct Lyrics {
 	bool found = false;
 	bool timed = false;                 // true: 'lines' has timestamps and follows the music
 	std::string source;                 // "lrc file" or "embedded tag"
+	std::string file;                   // the .lrc file the lyrics were read from (full path); empty for lyrics inside the song's tags
 	std::string title;                  // from the [ti:...] tag (may be empty)
 	std::string artist;                 // from the [ar:...] tag (may be empty)
 	std::string album;                  // from the [al:...] tag (may be empty)

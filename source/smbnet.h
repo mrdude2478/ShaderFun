@@ -58,6 +58,11 @@ bool startTreeScan(const std::string& startDir, ScanDirFn onDir, ScanDoneFn onDo
 void cancelTreeScan();
 bool treeScanning();
 
+// ---- is the share reachable? (asked of the network thread with its real connection, at low priority; see smbprobe.h)
+void requestCheck();                       // starts a check unless one is already waiting or running
+bool takeCheckResult(bool& reachable);     // true once when a requested check has finished
+uint32_t lastSuccessTick();                // SDL_GetTicks() of the last successful connection / folder listing (0 = none yet)
+
 // ---- a background task (asynchronous, lowest priority like the tree scan, and never at the same time as one)
 // step() runs on the network thread, again and again, as long as nothing more important is waiting for the network;
 // it returns true while there is more to do. done() is called once at the end (cancelled = cancelTask() was used).

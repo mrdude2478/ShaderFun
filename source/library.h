@@ -59,6 +59,8 @@ std::vector<Group> groupAlbums(const Snapshot& s, const std::vector<int>& trackI
 std::string playlistsDir();
 std::vector<Playlist> listPlaylists(const std::string& musicRoot);
 std::vector<std::string> loadPlaylist(const std::string& path);                // only files that exist, in order
+bool playlistHasPrefix(const std::string& path, const std::string& prefix);              // does any entry of the playlist start with this (e.g. "usb://<drive id>/")?
+bool playlistHasNetwork(const std::string& path);                               // does the playlist contain songs from the network share (smb://)?
 bool savePlaylist(const std::string& path, const std::vector<std::string>& tracks);
 int appendToPlaylist(const std::string& path, const std::vector<std::string>& tracks); // adds tracks that are not in it yet; returns how many were added, -1 on error
 bool deletePlaylist(const std::string& path);

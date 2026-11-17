@@ -54,6 +54,17 @@ namespace usbdrive {
 				}
 				out.fsType = LIBUSBHSFS_FS_TYPE_STR(d.fs_type);
 				out.capacity = d.capacity;
+				out.label = volume_label;
+				out.maker = maker;
+				out.product = product;
+				{ // FNV-1a over the things that identify the drive
+					const std::string key = volume_label + "|" + maker + "|" + product + "|" + out.fsType + "|" + std::to_string((unsigned long long)d.capacity);
+					uint32_t hv = 2166136261u;
+					for (unsigned char ch : key) { hv ^= ch; hv *= 16777619u; }
+					char buf[16];
+					snprintf(buf, sizeof(buf), "%08x", (unsigned)hv);
+					out.id = buf;
+				}
 				out.writeProtected = d.write_protect;
 				g_drives.push_back(out);
 				g_raw[g_rawCount++] = d;
@@ -116,6 +127,32 @@ namespace usbdrive {
 			if (!found) return false;
 		}
 		return usbHsFsUnmountDevice(&dev, true); // also triggers a fresh populate() call
+	}
+
+	bool findDrive(const std::string& mount, Drive& out) {
+		std::lock_guard<std::mutex> lock(g_mu);
+		for (const Drive& d : g_drives) if (d.mount == mount) { out = d; return true; }
+		return false;
+	}
+
+	std::string stablePath(const std::string& realPath) {
+		if (!isUsbPath(realPath)) return "";
+		const size_t colon = realPath.find(':');
+		Drive d;
+		if (!findDrive(realPath.substr(0, colon + 1), d)) return "";
+		std::string rest = realPath.substr(colon + 1); // "/Music/a.mp3"
+		if (rest.empty() || rest[0] != '/') rest = "/" + rest;
+		return "usb://" + d.id + rest;
+	}
+
+	std::string resolvePath(const std::string& stable) {
+		if (!isStablePath(stable)) return "";
+		const size_t slash = stable.find('/', 6);
+		const std::string id = stable.substr(6, slash == std::string::npos ? std::string::npos : slash - 6);
+		const std::string rest = slash == std::string::npos ? "/" : stable.substr(slash);
+		std::lock_guard<std::mutex> lock(g_mu);
+		for (const Drive& d : g_drives) if (d.id == id) return d.mount + rest;
+		return "";
 	}
 
 	bool isMounted(const std::string& path) {

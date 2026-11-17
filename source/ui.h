@@ -16,7 +16,8 @@ enum : uint32_t {
 	BTN_L = 1u << 8, BTN_R = 1u << 9, BTN_ZL = 1u << 10, BTN_ZR = 1u << 11,
 	BTN_R3 = 1u << 12, BTN_L3 = 1u << 13,
 	BTN_LS_UP = 1u << 14, BTN_LS_DOWN = 1u << 15, BTN_LS_LEFT = 1u << 16, BTN_LS_RIGHT = 1u << 17, // left stick as digital directions
-	BTN_RS_LEFT = 1u << 18, BTN_RS_RIGHT = 1u << 19  // right stick left/right
+	BTN_RS_LEFT = 1u << 18, BTN_RS_RIGHT = 1u << 19, // right stick left/right
+	BTN_RS_UP = 1u << 20, BTN_RS_DOWN = 1u << 21     // right stick up/down
 };
 
 struct Input {
@@ -49,6 +50,8 @@ void toast(const std::string& text); // small message in the top-left corner
 bool libraryOpen();
 bool lyricsAvailable();        // the current song has lyrics (a .lrc file or embedded in its tags)
 void lyricsShow(bool show);    // show / hide them (main.cpp: right stick right / left)
+bool lyricsWantedNow();      // the lyrics are switched on (they show when the song has some)
+void queueShow(bool show);     // show / hide the playing queue page (main.cpp: right stick right / left, when Settings chose the queue)
 int autoCycleSeconds();   // auto-change visualisation interval in seconds, 0 = off
 void bindShaders(const std::vector<std::string>* list, const int* current); // the shaders that can play now + the one showing (main.cpp)
 bool takeShaderRequest(std::string& path, bool& preview); // true once when a shader was chosen (preview = just trying it) on the Shaders page

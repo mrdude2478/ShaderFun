@@ -17,6 +17,7 @@ struct Result {
 
 // Lyrics found online earlier for this song (looked up by artist + title from its tags). Cheap: reads one small file.
 bool cachedForSong(const std::string& songPath, std::string& text);
+std::string cacheFileForSong(const std::string& songPath);   // the saved .lrc file of that song in the lyrics folder ("" if there is none)
 
 // Starts a lookup (the newest request replaces an older one that has not started yet). durationSeconds helps pick the right version.
 void request(const std::string& songPath, double durationSeconds);

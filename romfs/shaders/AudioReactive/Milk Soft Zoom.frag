@@ -24,7 +24,7 @@ void main() {
     float r = length(uv);
     float a = atan(uv.y, uv.x);
     // spin + zoom layers
-    float zoom = 0.7 + 0.3 * sin(t * 0.4) + b * 0.15;
+    float zoom = 0.2 + 0.3 * sin(t * 0.4) + b * 0.30;
     float ang = a + t * 0.3 + b * 0.5;
 
     vec3 col = vec3(0.0);
@@ -34,7 +34,7 @@ void main() {
         float za = ang + fi * 0.15;
         vec2 p = vec2(cos(za), sin(za)) * zr;
         float n = sin(p.x * 5.0 + t) * sin(p.y * 4.0 - t * 1.2);
-        float w = texture2D(iChannel0, vec2(fract(za * 0.1), 0.0)).r;
+        float w = texture2D(iChannel0, vec2(fract(za / 6.28318530718), 0.0)).r;
         vec3 c = 0.5 + 0.5 * cos(vec3(0.0, 2.0, 4.0) + n * 3.0 + fi + t + w);
         col += c * exp(-fi * 0.35) * (0.15 + w * 0.1);
     }

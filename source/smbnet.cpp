@@ -42,6 +42,8 @@ SDL_cond* g_cv = nullptr;
 SDL_Thread* g_thread = nullptr;
 bool g_quit = false;
 bool g_needReconnect = true;
+uint32_t g_lastOkTick = 0;   // the last successful connection / folder listing
+bool g_checkRequested = false, g_checkDone = false, g_checkOk = false;   // a reachability check (guarded by g_mu)
 int g_connGen = 0;   // counts destroyed connections: an open file handle is only valid for the connection it was opened on
 Settings g_settings;
 
@@ -283,6 +285,7 @@ bool ensureConnected(std::string& err) {
 		return false;
 	}
 	trace("connected");
+	g_lastOkTick = SDL_GetTicks() | 1u;
 	return true;
 }
 
@@ -318,6 +321,7 @@ bool listDirectory(const std::string& dir, std::vector<Entry>& out, std::string&
 		}
 		smb2_closedir(g_ctx, d);
 		ok = true;
+		g_lastOkTick = SDL_GetTicks() | 1u;
 	}
 	return ok;
 }
@@ -642,13 +646,32 @@ void taskStep() {
 	if (!more) taskFinish(false, "");
 }
 
+// Is the share reachable? Uses the real connection: when there is one, something small is asked of the server (the share's
+// top folder is opened); when that fails, or there is no connection, a new one is made. (A plain TCP test was not reliable.)
+void doCheck() {
+	bool ok = false;
+	std::string err;
+	if (g_ctx) {
+		smb2dir* d = smb2_opendir(g_ctx, "");
+		if (d) { smb2_closedir(g_ctx, d); ok = true; g_lastOkTick = SDL_GetTicks() | 1u; }
+		else markBroken(); // the connection is dead: the next step makes a new one
+	}
+	if (!ok) ok = ensureConnected(err);
+	SDL_LockMutex(g_mu);
+	g_checkRequested = false;
+	g_checkOk = ok;
+	g_checkDone = true;
+	SDL_UnlockMutex(g_mu);
+	trace("check: %s", ok ? "reachable" : err.c_str());
+}
+
 int workerMain(void*) {
 	g_socketsStarted = R_SUCCEEDED(socketInitializeDefault());
 	trimCache();
 	while (true) {
 		SDL_LockMutex(g_mu);
-		if (!g_quit && !g_listPending && g_streamPending.empty() && g_urgent.empty() && g_background.empty() && !g_scanActive && !g_taskActive) trace("worker: idle");
-		while (!g_quit && !g_listPending && g_streamPending.empty() && g_urgent.empty() && g_background.empty() && !g_scanActive && !g_taskActive) SDL_CondWait(g_cv, g_mu);
+		if (!g_quit && !g_listPending && g_streamPending.empty() && g_urgent.empty() && g_background.empty() && !g_scanActive && !g_taskActive && !g_checkRequested) trace("worker: idle");
+		while (!g_quit && !g_listPending && g_streamPending.empty() && g_urgent.empty() && g_background.empty() && !g_scanActive && !g_taskActive && !g_checkRequested) SDL_CondWait(g_cv, g_mu);
 		if (g_quit) { SDL_UnlockMutex(g_mu); break; }
 		if (g_listPending) { SDL_UnlockMutex(g_mu); serveList(); continue; }
 		if (!g_streamPending.empty()) {
@@ -669,8 +692,9 @@ int workerMain(void*) {
 		}
 		if (g_urgent.empty() && g_background.empty()) { // nothing more important is waiting: scan one folder / do one step of the task
 			const bool doScan = g_scanActive;
+			const bool doCheckNow = g_checkRequested;
 			SDL_UnlockMutex(g_mu);
-			if (doScan) scanStep(); else taskStep();
+			if (doCheckNow) doCheck(); else if (doScan) scanStep(); else taskStep();
 			continue;
 		}
 		std::string path;
@@ -840,6 +864,28 @@ bool treeScanning() {
 	SDL_UnlockMutex(g_mu);
 	return a;
 }
+
+void requestCheck() {
+	ensureThread();
+	SDL_LockMutex(g_mu);
+	if (!g_checkRequested) {
+		g_checkRequested = true;
+		g_checkDone = false;
+		SDL_CondSignal(g_cv);
+	}
+	SDL_UnlockMutex(g_mu);
+}
+
+bool takeCheckResult(bool& reachable) {
+	if (!g_mu) return false;
+	SDL_LockMutex(g_mu);
+	const bool done = g_checkDone;
+	if (done) { reachable = g_checkOk; g_checkDone = false; }
+	SDL_UnlockMutex(g_mu);
+	return done;
+}
+
+uint32_t lastSuccessTick() { return g_lastOkTick; }
 
 bool startTask(TaskStepFn step, TaskDoneFn done) {
 	ensureThread();

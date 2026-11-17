@@ -1,5 +1,6 @@
 #include "player.h"
 #include "smbnet.h"
+#include "usbdrive.h"
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_mixer.h>
@@ -783,14 +784,55 @@ bool playFile(const std::string& file) {
 	return loadCurrentOrSkip();
 }
 
-bool playTracks(const std::vector<std::string>& tracks, int startIndex) {
+static std::string g_playProblem;
+
+// Songs of a USB drive can come as stable paths ("usb://<drive id>/Music/a.mp3", from the database or a playlist): they are
+// turned into the drive's current mount path. Songs of a drive that is not plugged in are left out.
+// startIndex (optional) is moved so it still points at the same song.
+static std::vector<std::string> resolveForPlay(const std::vector<std::string>& in, int* startIndex) {
+	g_playProblem.clear();
+	std::vector<std::string> out;
+	out.reserve(in.size());
+	int newStart = 0, missing = 0;
+	for (size_t i = 0; i < in.size(); i++) {
+		if (startIndex && (int)i == *startIndex) newStart = (int)out.size();
+		if (usbdrive::isStablePath(in[i])) {
+			const std::string real = usbdrive::resolvePath(in[i]);
+			if (real.empty()) { missing++; continue; }
+			out.push_back(real);
+		}
+		else out.push_back(in[i]);
+	}
+	if (startIndex) *startIndex = newStart;
+	if (missing > 0) g_playProblem = out.empty() ? "The USB drive is not connected" : std::to_string(missing) + " songs left out: their USB drive is not connected";
+	return out;
+}
+
+std::string playProblem() { return g_playProblem; }
+
+bool playTracks(const std::vector<std::string>& tracksIn, int startIndex) {
+	if (tracksIn.empty()) return false;
+	if (startIndex < 0 || startIndex >= (int)tracksIn.size()) startIndex = 0;
+	const std::vector<std::string> tracks = resolveForPlay(tracksIn, &startIndex);
 	if (tracks.empty()) return false;
-	if (startIndex < 0 || startIndex >= (int)tracks.size()) startIndex = 0;
 	setQueue(tracks, startIndex);
 	return loadCurrentOrSkip();
 }
 
 std::vector<std::string> queuePaths() { return g_queue; }
+
+std::vector<std::string> playOrderPaths() {
+	std::vector<std::string> out;
+	out.reserve(g_order.size());
+	for (int qi : g_order) if (qi >= 0 && qi < (int)g_queue.size()) out.push_back(g_queue[qi]);
+	return out;
+}
+
+bool playOrderIndex(int pos) {
+	if (pos < 0 || pos >= (int)g_order.size()) return false;
+	g_pos = pos;
+	return loadCurrentOrSkip();
+}
 
 std::vector<std::string> chosenQueuePaths() {
 	std::vector<std::string> out;
@@ -805,7 +847,9 @@ std::vector<std::string> tracksInFolder(const std::string& dir) {
 	return tracks;
 }
 
-int enqueue(const std::vector<std::string>& tracks, bool playNext) {
+int enqueue(const std::vector<std::string>& tracksIn, bool playNext) {
+	if (tracksIn.empty()) return 0;
+	const std::vector<std::string> tracks = resolveForPlay(tracksIn, nullptr);
 	if (tracks.empty()) return 0;
 	const int k = (int)tracks.size();
 	if (g_queue.empty()) { // nothing queued: this becomes the queue

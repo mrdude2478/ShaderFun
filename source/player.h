@@ -61,6 +61,8 @@ bool playFolder(const std::string& dir);     // queue everything inside (recursi
 bool playFile(const std::string& file);      // queue the tracks of the file's folder, start at this file
 bool playTracks(const std::vector<std::string>& tracks, int startIndex); // queue exactly these tracks (albums, playlists...)
 std::vector<std::string> queuePaths();       // the current queue in its original order
+std::vector<std::string> playOrderPaths();   // the queue in the order it is played (shuffle included): what next / previous follow
+bool playOrderIndex(int pos);                // jump to this position of playOrderPaths() and play it
 // Only the queue entries YOU picked (played an album/folder/playlist, or added with enqueue).
 // The tracks the player loads by itself at start-up are left out, so they never end up in a saved playlist.
 std::vector<std::string> chosenQueuePaths();
@@ -69,6 +71,7 @@ std::vector<std::string> tracksInFolder(const std::string& dir); // every music 
 // playNext=true: they play right after the current track; false: at the end of the queue.
 // If nothing is queued yet they simply start playing. Returns how many tracks were added.
 int enqueue(const std::vector<std::string>& tracks, bool playNext);
+std::string playProblem();  // why the last playTracks() / enqueue() left songs out or failed ("" = nothing special), for example a USB drive that is not plugged in
 
 // ---- transport
 void play();                 // start/resume (starts the current queue entry if stopped)

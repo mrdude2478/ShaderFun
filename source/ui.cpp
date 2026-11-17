@@ -12,6 +12,11 @@
 #include "ftp.h"       // FTP port / user name / password (edited from Settings)
 #include "smbscan.h"  // scanning the SMB share into the database (Network settings)
 #include "smblib.h"   // the network library (loaded from the database)
+#include "netstatus.h" // is Wi-Fi on?
+#include "smbprobe.h"  // is the network share reachable?
+#include "usbscan.h"   // scanning a USB drive into the database (USB page)
+#include "usblib.h"    // the USB libraries (loaded from the database)
+#include "alllib.h"    // the main menu library: SD card + connected network share + connected USB drives
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -684,7 +689,7 @@ struct Repeater {
 		return false;
 	}
 };
-Repeater g_repUp, g_repDown, g_repVol, g_repPgUp, g_repPgDown;
+Repeater g_repUp, g_repDown, g_repVol, g_repPgUp, g_repPgDown, g_repRsUp, g_repRsDown;
 Repeater g_eqLeft, g_eqRight;
 int g_eqBand = -1;                                  // the band a finger is dragging
 // where the slider track sits inside a band row, in panel coordinates (shared by drawing and touch)
@@ -693,11 +698,11 @@ const float EQ_TRACK_X0 = 190.0f, EQ_TRACK_X1 = 560.0f, EQ_VALUE_X = 575.0f; // 
 // ============================================================================ library
 enum RowKind {
 	R_UP, R_PLAYDIR, R_SETDIR, R_DIR, R_FILE,                                   // folder browser
-	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, R_NETSCAN, R_SMB_ALBUMS, R_SMB_ARTISTS, R_SMB_GENRES, R_SMB_ALL, R_FTPSETTINGS, R_FTPFIELD, R_USBDRIVE, R_USBEJECT, R_SHADER, R_SEARCHAGAIN, // library views
-	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_SMB, R_HOME_USB, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT, R_HOME_SHADERS, R_HOME_SHORDER, R_HOME_SHSCOPE, R_HOME_SEARCH, R_HOME_ONLINELYR, R_HOME_SETTINGS, R_HOME_SHTOAST, R_HOME_SHFADE, R_HOME_HUDTRACK,
+	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, R_NETSCAN, R_USBSCAN, R_USBLIB_DRIVE, R_USB_SEARCH, R_USB_ALBUMS, R_USB_ARTISTS, R_USB_GENRES, R_USB_ALL, R_USB_PLAYLISTS, R_USB_FORGET, R_QUEUE_ITEM, R_QUEUE_NOW, R_QUEUE_LYRICS, R_SMB_SEARCH, R_SMB_ALBUMS, R_SMB_ARTISTS, R_SMB_GENRES, R_SMB_ALL, R_SMB_PLAYLISTS, R_FTPSETTINGS, R_FTPFIELD, R_USBDRIVE, R_USBEJECT, R_SHADER, R_SEARCHAGAIN, // library views
+	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_SMB, R_HOME_USBLIB, R_HOME_USB, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT, R_HOME_SHADERS, R_HOME_SHORDER, R_HOME_SHSCOPE, R_HOME_SEARCH, R_HOME_ONLINELYR, R_HOME_SETTINGS, R_HOME_SHTOAST, R_HOME_SHFADE, R_HOME_HUDTRACK, R_HOME_HIDENET, R_HOME_RSMODE,
 	R_HOME_EQ, R_EQ_BYPASS, R_EQ_PRESET, R_EQ_BAND0, R_EQ_BAND1, R_EQ_BAND2, R_EQ_BAND3, R_EQ_BAND4, R_EQ_BAND5, R_EQ_BAND6, R_EQ_BAND7, R_EQ_BAND8, R_EQ_BAND9
 };
-enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_SMBHOME, PG_NETSETTINGS, PG_FTPSETTINGS, PG_USB, PG_SHADERS, PG_SEARCH, PG_SETTINGS, PG_EQUALIZER };
+enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_SMBHOME, PG_USBLIBS, PG_USBHOME, PG_QUEUE, PG_NETSETTINGS, PG_FTPSETTINGS, PG_USB, PG_SHADERS, PG_SEARCH, PG_SETTINGS, PG_EQUALIZER };
 
 struct Row {
 	RowKind kind;
@@ -714,6 +719,9 @@ struct View {
 	int sel = 0;
 	float scroll = 0.0f, scrollDisp = 0.0f;
 	bool empty = false;
+	bool merged = false;                             // built from the main menu library (it changes when a source comes or goes)
+	std::string driveId;                             // pages of one scanned USB drive (the id, see usbdrive.h)
+	bool network = false;                            // a search page: it searched the network library (so "Search again" does too)
 	std::vector<std::string> trackPaths;             // what R_TRACK / R_PLAYALL play
 	std::vector<library::Group> groups;              // what R_ALBUM / R_ARTIST / R_GENRE open
 	std::shared_ptr<const library::Snapshot> snap;   // keeps the data behind 'groups' alive
@@ -927,18 +935,41 @@ View makeTrackView(PageKind kind, const std::string& title, const std::string& s
 std::string usbSummary(); // defined with the USB page below
 
 // what the home page says about the network library
+// what the home page says about the scanned USB drives
+std::string usbLibSummary() {
+	const std::vector<usblib::DriveInfo> ds = usblib::drives();
+	int here = 0;
+	for (const usblib::DriveInfo& d : ds) if (usblib::connected(d.id)) here++;
+	std::string s = std::to_string(ds.size()) + (ds.size() == 1 ? " drive" : " drives");
+	if (here == 0) s += " - not connected, browse only";
+	else if (here < (int)ds.size()) s += " - " + std::to_string(here) + " connected";
+	return s;
+}
+
 std::string smbSummary() {
-	if (smblib::loading() && smblib::snapshot()->tracks.empty()) return "loading...";
 	const size_t n = smblib::snapshot()->tracks.size();
-	return n == 0 ? std::string("not scanned yet (Network settings)") : std::to_string(n) + " songs";
+	std::string s = n == 0 ? std::string(smbscan::running() ? "scanning..." : "loading...") : std::to_string(n) + " songs";
+	if (!wifiConnected()) s += " - Wi-Fi off, browse only";
+	else if (!smbprobe::reachable()) s += " - share not reachable, browse only";
+	return s;
+}
+
+// Is the network library worth showing on the home page? Not when no share is set up or nothing has been scanned yet,
+// and (only if switched on in Settings) not while Wi-Fi is off.
+bool showNetworkLibrary() {
+	const smbnet::Config c = smbnet::getConfig();
+	if (c.server.empty() || c.share.empty()) return false;
+	if (smblib::snapshot()->tracks.empty() && !smbscan::running()) return false;
+	if (player::configInt("hide_net_offline", 0) != 0 && !wifiConnected()) return false;
+	return true;
 }
 
 View makeHome(int plCount) {
 	View v;
 	v.kind = PG_HOME;
 	v.title = "Library";
-	v.snap = library::snapshot();
-	v.builtVersion = library::version() + smblib::version();
+	v.snap = alllib::snapshot();
+	v.builtVersion = library::version() + smblib::version() + usblib::version() + alllib::version();
 	v.builtDone = library::scanDone();
 	v.builtScanning = library::scanning();
 	v.plCount = plCount;
@@ -952,7 +983,8 @@ View makeHome(int plCount) {
 	v.rows.push_back({ R_HOME_PLAYLISTS, "Playlists", "", std::to_string(plCount) });
 	v.rows.push_back({ R_HOME_ALL, "All songs", "", std::to_string(s.tracks.size()) });
 	v.rows.push_back({ R_HOME_NETWORK, "Network", "", smbnet::label() });
-	v.rows.push_back({ R_HOME_SMB, "Network library", "", smbSummary() });
+	if (showNetworkLibrary()) v.rows.push_back({ R_HOME_SMB, "Network library", "", smbSummary() });
+	if (!usblib::drives().empty()) v.rows.push_back({ R_HOME_USBLIB, "USB library", "", usbLibSummary() });
 	v.rows.push_back({ R_HOME_USB, "USB drive", "", usbSummary() });
 	v.rows.push_back({ R_HOME_SETTINGS, "Settings", "", "sleep timer, lyrics, shaders..." });
 	v.rows.push_back({ R_HOME_RESCAN, "Rescan library", "",
@@ -966,7 +998,8 @@ View makeGroupList(PageKind kind, std::shared_ptr<const library::Snapshot> useSn
 	const bool network = (useSnap != nullptr); // the network library instead of the SD card
 	View v;
 	v.kind = kind;
-	v.snap = network ? useSnap : library::snapshot();
+	v.snap = network ? useSnap : alllib::snapshot(); // (the main menu: SD card + whatever is connected)
+	v.merged = !network;
 	const library::Snapshot& s = *v.snap;
 	const std::vector<library::Group>& src = (kind == PG_ALBUMS) ? s.albums : (kind == PG_ARTISTS) ? s.artists : s.genres;
 	v.groups = src;
@@ -1031,12 +1064,50 @@ void sortByTitle(const library::Snapshot& s, std::vector<int>& idx) {
 
 View makeAllSongs(std::shared_ptr<const library::Snapshot> useSnap = nullptr) {
 	const bool network = (useSnap != nullptr);
-	auto snap = network ? useSnap : library::snapshot();
+	auto snap = network ? useSnap : alllib::snapshot();
 	std::vector<int> all(snap->tracks.size());
 	for (size_t i = 0; i < all.size(); i++) all[i] = (int)i;
 	sortByTitle(*snap, all);
 	View v = makeTrackView(PG_ALL, "All songs", plural(all.size(), "track", "tracks"), itemsFromTracks(*snap, all, 2), "Play all", snap);
 	v.emptyMsg = network ? std::string("Nothing here yet - scan the share in Network settings") : library::scanning() ? "Scanning your music..." : "No tracks in the library yet";
+	v.merged = !network;
+	return v;
+}
+
+// the scanned USB drives (plugged in or not)
+View makeUsbLibsView() {
+	View v;
+	v.kind = PG_USBLIBS;
+	v.title = "USB library";
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	const std::vector<usblib::DriveInfo> ds = usblib::drives();
+	for (const usblib::DriveInfo& d : ds)
+		v.rows.push_back({ R_USBLIB_DRIVE, d.label, d.id, std::to_string(d.songs) + " songs   " + (usblib::connected(d.id) ? "connected" : "not connected") });
+	v.subtitle = plural(ds.size(), "drive", "drives");
+	v.empty = ds.empty();
+	v.emptyMsg = "No drive scanned yet - use \"Scan ... into the database\" on the USB drive page";
+	v.sel = ds.empty() ? 0 : 1;
+	return v;
+}
+
+// one scanned USB drive: search, albums, artists, genres, all songs and playlists
+View makeUsbHome(const std::string& id) {
+	View v;
+	v.kind = PG_USBHOME;
+	v.driveId = id;
+	v.title = usblib::label(id);
+	v.snap = usblib::snapshot(id);
+	const library::Snapshot& s = *v.snap;
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_USB_SEARCH, "Search", "", g_lastSearch.empty() ? std::string("songs, albums, artists") : "\"" + g_lastSearch + "\"" });
+	v.rows.push_back({ R_USB_ALBUMS, "Albums", "", std::to_string(s.albums.size()) });
+	v.rows.push_back({ R_USB_ARTISTS, "Artists", "", std::to_string(s.artists.size()) });
+	v.rows.push_back({ R_USB_GENRES, "Genres", "", std::to_string(s.genres.size()) });
+	v.rows.push_back({ R_USB_ALL, "All songs", "", std::to_string(s.tracks.size()) });
+	v.rows.push_back({ R_USB_PLAYLISTS, "Playlists", "", "" });
+	v.rows.push_back({ R_USB_FORGET, "Forget this drive", "", "removes it from the database" });
+	v.subtitle = plural(s.tracks.size(), "song", "songs") + (usblib::connected(id) ? std::string("  -  connected") : std::string("  -  not connected (browse only)"));
+	v.sel = 1;
 	return v;
 }
 
@@ -1048,26 +1119,74 @@ View makeSmbHome() {
 	v.snap = smblib::snapshot();
 	const library::Snapshot& s = *v.snap;
 	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_SMB_SEARCH, "Search", "", g_lastSearch.empty() ? std::string("songs, albums, artists") : "\"" + g_lastSearch + "\"" });
 	v.rows.push_back({ R_SMB_ALBUMS, "Albums", "", std::to_string(s.albums.size()) });
 	v.rows.push_back({ R_SMB_ARTISTS, "Artists", "", std::to_string(s.artists.size()) });
 	v.rows.push_back({ R_SMB_GENRES, "Genres", "", std::to_string(s.genres.size()) });
 	v.rows.push_back({ R_SMB_ALL, "All songs", "", std::to_string(s.tracks.size()) });
+	v.rows.push_back({ R_SMB_PLAYLISTS, "Playlists", "", "" });
 	v.subtitle = s.tracks.empty() ? std::string(smblib::loading() ? "Loading..." : "Not scanned yet - use Network settings") : plural(s.tracks.size(), "song", "songs");
 	v.sel = 1;
 	return v;
 }
 
+// The playing queue: every song in the order it will be played, the one playing now highlighted. A plays the highlighted song.
+View makeQueueView() {
+	View v;
+	v.kind = PG_QUEUE;
+	v.title = "Playing queue";
+	const std::vector<std::string> order = player::playOrderPaths();
+	const int now = player::queueIndex();
+
+	// titles: from whichever library knows the song (the SD card, the network share, the USB drives)
+	const std::shared_ptr<const library::Snapshot> sd = library::snapshot();
+	const std::shared_ptr<const library::Snapshot> smb = smblib::snapshot();
+	std::vector<std::shared_ptr<const library::Snapshot>> usb;
+	for (const usblib::DriveInfo& d : usblib::drives()) usb.push_back(usblib::snapshot(d.id));
+	std::unordered_map<std::string, const library::Track*> index;
+	index.reserve(sd->tracks.size() + smb->tracks.size());
+	for (const library::Track& t : sd->tracks) index[t.path] = &t;
+	for (const library::Track& t : smb->tracks) index[t.path] = &t;
+	for (const auto& s : usb) for (const library::Track& t : s->tracks) index[t.path] = &t;
+
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_QUEUE_LYRICS, "Lyrics", "", "show or hide" });
+	int nowRow = 2;
+	for (size_t i = 0; i < order.size(); i++) {
+		std::string key = order[i];
+		if (usbdrive::isUsbPath(key)) { const std::string st = usbdrive::stablePath(key); if (!st.empty()) key = st; } // (the database knows USB songs by drive id)
+		auto f = index.find(key);
+		std::string label, sub;
+		if (f != index.end()) { label = library::displayTitle(*f->second); sub = f->second->artist.empty() ? f->second->albumArtist : f->second->artist; }
+		else label = player::baseName(order[i]);
+		const bool isNow = (int)i == now;
+		if (isNow) nowRow = (int)v.rows.size();
+		v.rows.push_back({ isNow ? R_QUEUE_NOW : R_QUEUE_ITEM, std::to_string(i + 1) + ". " + label, order[i], sub, (int)i });
+	}
+	v.subtitle = order.empty() ? std::string("Nothing queued yet")
+		: (now >= 0 ? "Playing " + std::to_string(now + 1) + " of " + std::to_string(order.size()) : std::to_string(order.size()) + " songs") + "  -  " + player::modeName(player::mode());
+	v.sel = std::min(nowRow, (int)v.rows.size() - 1);
+	return v;
+}
+
 View makePlaylistView(const std::string& path, const std::string& name) {
 	auto snap = library::snapshot();
-	std::unordered_map<std::string, int> index;
-	for (size_t i = 0; i < snap->tracks.size(); i++) index[snap->tracks[i].path] = (int)i;
+	auto netSnap = smblib::snapshot(); // titles of network songs come from the network library
+	std::unordered_map<std::string, const library::Track*> index;
+	for (const library::Track& t : snap->tracks) index[t.path] = &t;
+	for (const library::Track& t : netSnap->tracks) index[t.path] = &t;
+	std::vector<std::shared_ptr<const library::Snapshot>> usbSnaps; // (kept alive while the labels are built)
+	for (const usblib::DriveInfo& d : usblib::drives()) {
+		usbSnaps.push_back(usblib::snapshot(d.id));
+		for (const library::Track& t : usbSnaps.back()->tracks) index[t.path] = &t;
+	}
 	std::vector<Item> items;
 	for (const std::string& p : library::loadPlaylist(path)) {
 		Item it;
 		it.path = p;
 		auto f = index.find(p);
 		if (f != index.end()) {
-			const library::Track& t = snap->tracks[f->second];
+			const library::Track& t = *f->second;
 			it.label = library::displayTitle(t);
 			it.sub = t.artist.empty() ? t.albumArtist : t.artist;
 		}
@@ -1084,18 +1203,26 @@ View makePlaylistView(const std::string& path, const std::string& name) {
 	return v;
 }
 
-View makePlaylistsView() {
+View makePlaylistsView(bool network = false, const std::string& driveId = "") { // network / driveId: only the playlists that contain songs from the network share / that USB drive
 	View v;
 	v.kind = PG_PLAYLISTS;
-	v.title = "Playlists";
+	v.network = network;
+	v.driveId = driveId;
+	v.title = network ? "Network playlists" : !driveId.empty() ? usblib::label(driveId) + " playlists" : "Playlists";
 	v.rows.push_back({ R_BACK, "Back", "", "" });
 	if (!player::chosenQueuePaths().empty()) v.rows.push_back({ R_SAVEQUEUE, "Save my queued songs as a playlist", "", "" });
 	const size_t firstList = v.rows.size();
-	const std::vector<library::Playlist> pls = library::listPlaylists(player::musicFolder());
+	std::vector<library::Playlist> pls = library::listPlaylists(player::musicFolder());
+	if (network || !driveId.empty()) {
+		const std::string prefix = network ? std::string("smb://") : "usb://" + driveId + "/";
+		std::vector<library::Playlist> keep;
+		for (const library::Playlist& p : pls) if (library::playlistHasPrefix(p.path, prefix)) keep.push_back(p);
+		pls.swap(keep);
+	}
 	for (const library::Playlist& p : pls) v.rows.push_back({ R_PLAYLIST, p.name, p.path, "" });
 	v.subtitle = plural(pls.size(), "playlist", "playlists");
 	v.empty = pls.empty();
-	v.emptyMsg = "No playlists yet - add .m3u files to switch/shaderfun/playlists";
+	v.emptyMsg = network ? "No network playlists yet - highlight a network song, album or artist and add it to a playlist" : !driveId.empty() ? "No playlists with songs from this drive yet - highlight a song, album or artist and add it to a playlist" : "No playlists yet - add .m3u files to switch/shaderfun/playlists";
 	v.sel = (int)(firstList < v.rows.size() ? firstList : v.rows.size() - 1);
 	return v;
 }
@@ -1160,7 +1287,14 @@ void libOpenNow() {
 	else libUpdatePlaylistCount();
 }
 
-void libClose() { if (g_lib.mode == M_PICK) g_lib.mode = g_lib.pickReturn; g_lib.open = false; g_touchOwned = false; }
+bool onQueuePage() { return g_lib.open && g_lib.mode == M_MENU && !g_lib.stack.empty() && g_lib.stack.back().kind == PG_QUEUE; }
+
+void libClose() {
+	if (g_lib.mode == M_PICK) g_lib.mode = g_lib.pickReturn;
+	g_lib.open = false;
+	g_touchOwned = false;
+	if (g_lib.mode == M_MENU && g_lib.stack.size() > 1 && g_lib.stack.back().kind == PG_QUEUE) g_lib.stack.pop_back(); // the queue page is not kept for next time
+}
 
 // B closes only at the very top; Left goes back but never closes
 void libBack(bool allowClose) {
@@ -1179,7 +1313,7 @@ void libRefreshHome() {
 	if (g_lib.stack.empty()) return;
 	View& h = g_lib.stack[0];
 	const bool scan = library::scanning();
-	if (!h.dirty && h.builtVersion == library::version() + smblib::version() && h.builtScanning == scan && (!scan || h.builtDone == library::scanDone())) return;
+	if (!h.dirty && h.builtVersion == library::version() + smblib::version() + usblib::version() + alllib::version() && h.builtScanning == scan && (!scan || h.builtDone == library::scanDone())) return;
 	View nv = makeHome(h.plCount);
 	nv.sel = std::min(std::max(h.sel, 0), (int)nv.rows.size() - 1); // a row may have disappeared (sleep timer option)
 	nv.scroll = h.scroll;
@@ -1300,9 +1434,11 @@ std::string suggestPlaylistName() {
 
 void saveQueueAsPlaylist() {
 	std::vector<std::string> q;
-	for (const std::string& p : player::chosenQueuePaths()) // not the tracks the player loaded by itself
-		if (!smbnet::isRemote(p) && !usbdrive::isUsbPath(p)) q.push_back(p); // network / USB songs cannot be saved in playlists yet
-	if (q.empty()) { showToast("You haven't queued anything yet (network and USB songs can't be saved in playlists)"); return; }
+	for (const std::string& p : player::chosenQueuePaths()) { // not the tracks the player loaded by itself
+		if (usbdrive::isUsbPath(p)) { const std::string st = usbdrive::stablePath(p); if (!st.empty()) q.push_back(st); } // (a USB song is saved by its drive id, not by the slot name)
+		else q.push_back(p);
+	}
+	if (q.empty()) { showToast("You haven't queued anything yet"); return; }
 	mkdir("sdmc:/switch/shaderfun", 0777);
 	mkdir(library::playlistsDir().c_str(), 0777);
 	char stamp[48];
@@ -1317,7 +1453,7 @@ void saveQueueAsPlaylist() {
 	const std::string savePath = uniquePlaylistPath(wanted, name);
 	if (library::savePlaylist(savePath, q)) {
 		showToast("Saved playlist: " + name);
-		if (!g_lib.stack.empty()) g_lib.stack.back() = makePlaylistsView(); // show it
+		if (!g_lib.stack.empty()) g_lib.stack.back() = makePlaylistsView(g_lib.stack.back().kind == PG_PLAYLISTS && g_lib.stack.back().network, g_lib.stack.back().kind == PG_PLAYLISTS ? g_lib.stack.back().driveId : std::string()); // show it
 		libUpdatePlaylistCount();
 	}
 	else {
@@ -1330,7 +1466,7 @@ void libDeletePlaylist(const std::string& path, const std::string& name) {
 	if (g_lib.stack.size() > 1) g_lib.stack.pop_back(); // leave the deleted playlist's page
 	if (g_lib.stack.size() > 1 && g_lib.stack.back().kind == PG_PLAYLISTS) {
 		const int oldSel = g_lib.stack.back().sel;
-		View nv = makePlaylistsView();
+		View nv = makePlaylistsView(g_lib.stack.back().network, g_lib.stack.back().driveId);
 		nv.sel = std::min(std::max(oldSel, 0), (int)nv.rows.size() - 1);
 		g_lib.stack.back() = std::move(nv);
 		ensureVisible(g_lib.stack.back());
@@ -1403,6 +1539,7 @@ View makeUsbView() {
 	const std::vector<usbdrive::Drive> drives = usbdrive::drives();
 	for (const usbdrive::Drive& d : drives) {
 		v.rows.push_back({ R_USBDRIVE, d.name, d.mount + "/", d.fsType + "   " + capacityText(d.capacity) });
+		v.rows.push_back({ R_USBSCAN, "Scan " + d.name + " into the database", d.mount, usbscan::running() ? "scanning... (select to stop)" : "select to start" });
 		v.rows.push_back({ R_USBEJECT, "Safely remove " + d.name, d.mount, "" });
 	}
 	v.empty = drives.empty();
@@ -1467,35 +1604,42 @@ std::string foldText(const std::string& in) {
 struct SearchCache {
 	std::shared_ptr<const library::Snapshot> snap; // kept so a new snapshot is recognised
 	std::vector<std::string> title, artist, album, other, artistName, albumName;
-} g_sc;
+} g_sc[4]; // the main menu library, the network library and USB drives: switching between them does not rebuild
+int g_scNext = 0;
 
-void ensureSearchCache(const std::shared_ptr<const library::Snapshot>& snap) {
-	if (g_sc.snap == snap) return;
-	g_sc = SearchCache();
-	g_sc.snap = snap;
+SearchCache& searchCacheFor(const std::shared_ptr<const library::Snapshot>& snap) {
+	for (int k = 0; k < 4; k++) if (g_sc[k].snap == snap) return g_sc[k];
+	SearchCache& c = g_sc[g_scNext];
+	g_scNext = (g_scNext + 1) % 4;
+	c = SearchCache();
+	c.snap = snap;
 	const library::Snapshot& s = *snap;
 	const size_t n = s.tracks.size();
-	g_sc.title.resize(n); g_sc.artist.resize(n); g_sc.album.resize(n); g_sc.other.resize(n);
+	c.title.resize(n); c.artist.resize(n); c.album.resize(n); c.other.resize(n);
 	for (size_t i = 0; i < n; i++) {
 		const library::Track& t = s.tracks[i];
-		g_sc.title[i] = foldText(library::displayTitle(t));
-		g_sc.artist[i] = foldText(t.artist);
-		g_sc.album[i] = foldText(library::albumDisplayName(t));
-		g_sc.other[i] = foldText(t.albumArtist + " " + t.genre + " " + t.year);
+		c.title[i] = foldText(library::displayTitle(t));
+		c.artist[i] = foldText(t.artist);
+		c.album[i] = foldText(library::albumDisplayName(t));
+		c.other[i] = foldText(t.albumArtist + " " + t.genre + " " + t.year);
 	}
-	for (const library::Group& g : s.artists) g_sc.artistName.push_back(foldText(g.name));
-	for (const library::Group& g : s.albums) g_sc.albumName.push_back(foldText(g.name + " " + g.sub));
+	for (const library::Group& g : s.artists) c.artistName.push_back(foldText(g.name));
+	for (const library::Group& g : s.albums) c.albumName.push_back(foldText(g.name + " " + g.sub));
+	return c;
 }
 
 bool hasText(const std::string& hay, const std::string& needle) { return hay.find(needle) != std::string::npos; }
 
-View makeSearchView(const std::string& query) {
+View makeSearchView(const std::string& query, std::shared_ptr<const library::Snapshot> useSnap = nullptr, const std::string& driveId = "", bool all = false) { // all: the main menu search (SD card + connected network share + connected USB drives)
+	const bool network = (useSnap != nullptr); // searching the network library instead of the SD card
 	View v;
 	v.kind = PG_SEARCH;
-	v.title = "Search: " + query;
-	v.snap = library::snapshot();
+	v.title = (!driveId.empty() ? usblib::label(driveId) + " search: " : (network && !all) ? "Network search: " : "Search: ") + query;
+	v.snap = network ? useSnap : alllib::snapshot(); // (the main menu: SD card + whatever is connected)
+	v.network = network && driveId.empty() && !all;
+	v.driveId = driveId;
 	const library::Snapshot& s = *v.snap;
-	ensureSearchCache(v.snap);
+	SearchCache& sc = searchCacheFor(v.snap);
 
 	std::vector<std::string> words; // every word has to be found (anywhere, any order)
 	{
@@ -1516,10 +1660,10 @@ View makeSearchView(const std::string& query) {
 		int score = 0;
 		bool all = true;
 		for (const std::string& w : words) {
-			if (hasText(g_sc.title[i], w)) continue;
-			if (hasText(g_sc.artist[i], w)) { score += 1; continue; }
-			if (hasText(g_sc.album[i], w)) { score += 2; continue; }
-			if (hasText(g_sc.other[i], w)) { score += 3; continue; }
+			if (hasText(sc.title[i], w)) continue;
+			if (hasText(sc.artist[i], w)) { score += 1; continue; }
+			if (hasText(sc.album[i], w)) { score += 2; continue; }
+			if (hasText(sc.other[i], w)) { score += 3; continue; }
 			all = false;
 			break;
 		}
@@ -1532,12 +1676,12 @@ View makeSearchView(const std::string& query) {
 	std::vector<library::Group> artistHits, albumHits;
 	for (size_t i = 0; i < s.artists.size() && artistHits.size() < MAX_GROUPS && !words.empty(); i++) {
 		bool all = true;
-		for (const std::string& w : words) if (!hasText(g_sc.artistName[i], w)) { all = false; break; }
+		for (const std::string& w : words) if (!hasText(sc.artistName[i], w)) { all = false; break; }
 		if (all) artistHits.push_back(s.artists[i]);
 	}
 	for (size_t i = 0; i < s.albums.size() && albumHits.size() < MAX_GROUPS && !words.empty(); i++) {
 		bool all = true;
-		for (const std::string& w : words) if (!hasText(g_sc.albumName[i], w)) { all = false; break; }
+		for (const std::string& w : words) if (!hasText(sc.albumName[i], w)) { all = false; break; }
 		if (all) albumHits.push_back(s.albums[i]);
 	}
 
@@ -1564,19 +1708,24 @@ View makeSearchView(const std::string& query) {
 	if (!artistHits.empty()) sub += "  -  " + plural(artistHits.size(), "artist", "artists");
 	if (!albumHits.empty()) sub += "  -  " + plural(albumHits.size(), "album", "albums");
 	if (songTotal > songs.size()) sub += "  (first " + std::to_string(songs.size()) + " shown)";
-	if (library::scanning()) sub += "  -  library still scanning (" + std::to_string(library::scanDone()) + " of " + std::to_string(library::scanTotal()) + ")";
+	if ((!network || all) && library::scanning()) sub += "  -  library still scanning (" + std::to_string(library::scanDone()) + " of " + std::to_string(library::scanTotal()) + ")";
+	if (network && !all && driveId.empty() && smblib::loading()) sub += "  -  network library still loading";
 	v.subtitle = sub;
 	v.empty = songs.empty() && artistHits.empty() && albumHits.empty();
-	v.emptyMsg = library::scanning() ? "Nothing found yet - the library is still being built" : "Nothing found";
+	v.emptyMsg = ((!network || all) && library::scanning()) ? "Nothing found yet - the library is still being built" : "Nothing found";
 	v.sel = v.empty ? 1 : 2; // on the first result
 	return v;
 }
 
 // Asks for the text and shows the results. again = replace the results page we are on instead of opening a new one.
-void libSearch(bool again) {
-	const std::shared_ptr<const library::Snapshot> snap = library::snapshot();
+void libSearch(bool again, std::shared_ptr<const library::Snapshot> network = nullptr, const std::string& driveId = "", bool all = false) {
+	const bool net = (network != nullptr); // a library other than the default one (the network library, a USB drive, or "all")
+	const std::shared_ptr<const library::Snapshot> snap = net ? network : alllib::snapshot();
 	if (!snap || snap->tracks.empty()) {
-		showToast(library::scanning() ? "The library is still being built - try again in a moment" : "The library is empty - scan your music first");
+		if (!driveId.empty()) showToast("No songs from this drive are in the database yet - scan it first (USB drive page)");
+		else if (all) showToast(library::scanning() ? "The library is still being built - try again in a moment" : "The library is empty - scan your music first");
+		else if (net) showToast(smblib::loading() ? "The network library is still loading - try again in a moment" : "The network library is empty - scan the share first (Network settings)");
+		else showToast(library::scanning() ? "The library is still being built - try again in a moment" : "The library is empty - scan your music first");
 		return;
 	}
 	std::string text;
@@ -1585,7 +1734,7 @@ void libSearch(bool again) {
 	if (nr == NAME_CANCELLED) return;
 	if (text.empty()) { showToast("Type something to search for"); return; }
 	g_lastSearch = text;
-	View sv = makeSearchView(text);
+	View sv = makeSearchView(text, snap, driveId, all);
 	if (again && !g_lib.stack.empty() && g_lib.stack.back().kind == PG_SEARCH) g_lib.stack.back() = std::move(sv);
 	else libPush(std::move(sv));
 	if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; // the menu row shows the last search
@@ -1841,7 +1990,7 @@ void libCompleteAdd(const std::string& targetPath, const std::string& targetName
 		const float sc = u.scroll;
 		bool rebuilt = false;
 		if (u.kind == PG_PLAYLIST && u.playlistPath == path) { const std::string t = u.title; u = makePlaylistView(path, t); rebuilt = true; }
-		else if (u.kind == PG_PLAYLISTS) { u = makePlaylistsView(); rebuilt = true; }
+		else if (u.kind == PG_PLAYLISTS) { u = makePlaylistsView(u.network, u.driveId); rebuilt = true; }
 		if (rebuilt) {
 			u.sel = std::min(std::max(sel, 0), (int)u.rows.size() - 1);
 			u.scroll = sc;
@@ -1873,7 +2022,7 @@ void libRenamePlaylist() {
 		if (u.kind == PG_PLAYLISTS) {
 			const int sel = u.sel;
 			const float sc = u.scroll;
-			u = makePlaylistsView();
+			u = makePlaylistsView(u.network, u.driveId);
 			u.sel = std::min(std::max(sel, 0), (int)u.rows.size() - 1);
 			u.scroll = sc;
 			ensureVisible(u);
@@ -1890,20 +2039,22 @@ View makeSettingsView() {
 	v.title = "Settings";
 	v.subtitle = "Changes are saved straight away";
 	v.rows.push_back({ R_BACK, "Back", "", "" });
+	v.rows.push_back({ R_FTPSETTINGS, "FTP server", "", std::string(ftp_get_username()) + " @ port " + std::to_string(ftp_get_port()) });
 	v.rows.push_back({ R_HOME_SLEEP, "Sleep timer", "", sleepLabel() });
 	if (player::sleepActive()) // only relevant while a sleep timer is running
 		v.rows.push_back({ R_HOME_SLEEPACT, "When the sleep timer ends", "", player::configInt("sleep_quit", 1) ? "close the app" : "pause only" });
 	v.rows.push_back({ R_HOME_EQ, "Equalizer", "", equalizer::bypass() ? std::string("off") : std::string(equalizer::presetName(equalizer::currentPreset())) });
 	v.rows.push_back({ R_HOME_ONLINELYR, "Online lyrics", "", player::configInt("online_lyrics", 0) ? "on (lrclib.net)" : "off" });
 	v.rows.push_back({ R_HOME_RESUME, "Resume on launch", "", player::configInt("resume_play", 0) ? "keeps playing" : "starts paused" });
+	v.rows.push_back({ R_HOME_RSMODE, "Right stick left / right", "", player::configInt("rs_queue", 0) ? "playing queue" : "lyrics" });
+	v.rows.push_back({ R_HOME_HIDENET, "Hide network library when Wi-Fi is off", "", player::configInt("hide_net_offline", 0) ? "on" : "off" });
+	v.rows.push_back({ R_HOME_HUDTRACK, "Show player when a new track starts", "", player::configInt("hud_on_track", 1) ? "on" : "off" });
 	v.rows.push_back({ R_HOME_AUTO, "Auto-change visualisation", "", autoLabel() });
 	v.rows.push_back({ R_HOME_SHADERS, "Shaders", "", std::to_string(shaderpick::favouriteCount()) + (shaderpick::favouriteCount() == 1 ? " favourite" : " favourites") });
 	v.rows.push_back({ R_HOME_SHSCOPE, "Shader list", "", shaderpick::scope() == shaderpick::SCOPE_FAVOURITES ? "favourites only" : "all shaders" });
 	v.rows.push_back({ R_HOME_SHORDER, "Shader order", "", shaderpick::order() == shaderpick::ORDER_RANDOM ? "random" : "in order" });
-	v.rows.push_back({ R_FTPSETTINGS, "FTP server", "", std::string(ftp_get_username()) + " @ port " + std::to_string(ftp_get_port()) });
 	v.rows.push_back({ R_HOME_SHTOAST, "Show shader name when it changes", "", player::configInt("shader_toast", 1) ? "on" : "off" });
 	v.rows.push_back({ R_HOME_SHFADE, "Smooth shader changes", "", player::configInt("shader_fade", 1) ? "on" : "off" });
-	v.rows.push_back({ R_HOME_HUDTRACK, "Show player when a new track starts", "", player::configInt("hud_on_track", 1) ? "on" : "off" });
 	v.sel = 1;
 	return v;
 }
@@ -2039,11 +2190,63 @@ void libActivate(int idx) {
 	case R_HOME_PLAYLISTS: libUpdatePlaylistCount(); libPush(makePlaylistsView()); break;
 	case R_HOME_NETWORK: libOpenNetwork(); break;
 	case R_HOME_SMB: libPush(makeSmbHome()); break;
+	case R_QUEUE_ITEM: case R_QUEUE_NOW:
+		if (player::playOrderIndex(row.ref)) libClose();
+		else showToast("Could not play that song");
+		break;
+	case R_QUEUE_LYRICS: {
+		const bool show = !lyricsWantedNow();
+		libClose();
+		lyricsShow(show);
+		break;
+	}
+	case R_HOME_RSMODE:
+		player::setConfigInt("rs_queue", player::configInt("rs_queue", 0) ? 0 : 1);
+		showToast(player::configInt("rs_queue", 0) ? "Right stick left / right now opens and closes the playing queue (lyrics: the Lyrics row on that page)" : "Right stick left / right shows and hides the lyrics");
+		settingsChanged();
+		break;
+	case R_HOME_USBLIB: libPush(makeUsbLibsView()); break;
+	case R_USBLIB_DRIVE: libPush(makeUsbHome(row.path)); break;
+	case R_USB_SEARCH: { const std::string id = v.driveId; libSearch(false, usblib::snapshot(id), id); break; }
+	case R_USB_ALBUMS: { const std::string id = v.driveId; View nv = makeGroupList(PG_ALBUMS, usblib::snapshot(id)); nv.title = usblib::label(id) + " albums"; nv.driveId = id; libPush(std::move(nv)); break; }
+	case R_USB_ARTISTS: { const std::string id = v.driveId; View nv = makeGroupList(PG_ARTISTS, usblib::snapshot(id)); nv.title = usblib::label(id) + " artists"; nv.driveId = id; libPush(std::move(nv)); break; }
+	case R_USB_GENRES: { const std::string id = v.driveId; View nv = makeGroupList(PG_GENRES, usblib::snapshot(id)); nv.title = usblib::label(id) + " genres"; nv.driveId = id; libPush(std::move(nv)); break; }
+	case R_USB_ALL: { const std::string id = v.driveId; View nv = makeAllSongs(usblib::snapshot(id)); nv.title = usblib::label(id) + " songs"; nv.driveId = id; libPush(std::move(nv)); break; }
+	case R_USB_PLAYLISTS: libPush(makePlaylistsView(false, v.driveId)); break;
+	case R_USB_FORGET:
+		if (!v.confirmDelete) { // first press only asks; the second one removes it
+			v.confirmDelete = true;
+			v.rows[idx].label = "Press A again to forget this drive";
+			showToast("Move away to cancel, or press A again to remove it from the database");
+		}
+		else {
+			const std::string id = v.driveId;
+			const std::string name = usblib::label(id);
+			usblib::forgetDrive(id);
+			if (g_lib.stack.size() > 1) g_lib.stack.pop_back(); // v is gone after this
+			if (!g_lib.stack.empty() && g_lib.stack.back().kind == PG_USBLIBS) { // the list of drives without it
+				View& lv = g_lib.stack.back();
+				lv = makeUsbLibsView();
+				clampScroll(lv);
+				lv.scrollDisp = lv.scroll;
+			}
+			if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true;
+			showToast("Forgot " + name + " (scan it again to bring it back)");
+		}
+		break;
+	case R_SMB_SEARCH: libSearch(false, smblib::snapshot()); break;
+	case R_SMB_PLAYLISTS: libPush(makePlaylistsView(true)); break;
 	case R_SMB_ALBUMS: { View nv = makeGroupList(PG_ALBUMS, smblib::snapshot()); nv.title = "Network albums"; libPush(std::move(nv)); break; }
 	case R_SMB_ARTISTS: { View nv = makeGroupList(PG_ARTISTS, smblib::snapshot()); nv.title = "Network artists"; libPush(std::move(nv)); break; }
 	case R_SMB_GENRES: { View nv = makeGroupList(PG_GENRES, smblib::snapshot()); nv.title = "Network genres"; libPush(std::move(nv)); break; }
 	case R_SMB_ALL: { View nv = makeAllSongs(smblib::snapshot()); nv.title = "Network songs"; libPush(std::move(nv)); break; }
-	case R_HOME_SEARCH: libSearch(false); break;
+	case R_HOME_SEARCH: libSearch(false, alllib::snapshot(), "", true); break;
+	case R_HOME_HIDENET:
+		player::setConfigInt("hide_net_offline", player::configInt("hide_net_offline", 0) ? 0 : 1);
+		showToast(player::configInt("hide_net_offline", 0) ? "The network library is hidden while Wi-Fi is off" : "The network library stays in the menu when Wi-Fi is off (browse only)");
+		settingsChanged();
+		if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true; // the menu row appears / disappears
+		break;
 	case R_HOME_HUDTRACK:
 		player::setConfigInt("hud_on_track", player::configInt("hud_on_track", 1) ? 0 : 1);
 		showToast(player::configInt("hud_on_track", 1) ? "The player is shown when the next track starts" : "The player stays hidden when the next track starts (pressing a button still shows it)");
@@ -2069,7 +2272,14 @@ void libActivate(int idx) {
 		settingsChanged();
 		break;
 	}
-	case R_SEARCHAGAIN: libSearch(true); break;
+	case R_SEARCHAGAIN: { // searches the same library again
+		const std::string did = cur().driveId;
+		const bool net = cur().network;
+		if (!did.empty()) libSearch(true, usblib::snapshot(did), did);
+		else if (net) libSearch(true, smblib::snapshot());
+		else libSearch(true, alllib::snapshot(), "", true);
+		break;
+	}
 	case R_HOME_SHADERS: libPush(makeShadersView()); break;
 	case R_HOME_SHORDER:
 		shaderpick::setOrder(shaderpick::order() == shaderpick::ORDER_RANDOM ? shaderpick::ORDER_LIST : shaderpick::ORDER_RANDOM);
@@ -2101,6 +2311,21 @@ void libActivate(int idx) {
 	}
 	case R_HOME_USB: libPush(makeUsbView()); break;
 	case R_USBDRIVE: g_lib.mode = M_FOLDERS; libEnter(row.path); break;
+	case R_USBSCAN: {
+		if (usbscan::running()) { usbscan::cancel(); showToast("Stopping the scan..."); }
+		else if (usbscan::start(row.path)) showToast("Scanning the drive in the background. A message appears when it is done");
+		View& cv = cur();
+		if (cv.kind == PG_USB) { // redraw the page, keeping the selection
+			const int sel = cv.sel;
+			const float sc = cv.scroll;
+			cv = makeUsbView();
+			cv.sel = std::min(sel, (int)cv.rows.size() - 1);
+			cv.scroll = sc;
+			clampScroll(cv);
+			cv.scrollDisp = cv.scroll;
+		}
+		break;
+	}
 	case R_USBEJECT: {
 		const std::string mount = row.path;
 		const std::string playing = player::currentPath();
@@ -2207,11 +2432,11 @@ void libActivate(int idx) {
 		break;
 	case R_PLAYALL:
 		if (player::playTracks(v.trackPaths, 0)) { showToast("Playing: " + v.title); libClose(); }
-		else showToast("Nothing to play here");
+		else showToast(player::playProblem().empty() ? std::string("Nothing to play here") : player::playProblem());
 		break;
 	case R_TRACK:
 		if (player::playTracks(v.trackPaths, row.ref)) libClose();
-		else showToast("Could not play that track");
+		else showToast(player::playProblem().empty() ? std::string("Could not play that track") : player::playProblem());
 		break;
 	}
 }
@@ -2244,7 +2469,7 @@ void libQueueSelected(bool playNext) {
 	if (paths.empty()) { showToast("Nothing to queue there"); return; }
 	const bool wasEmpty = !player::hasTracks();
 	const int added = player::enqueue(paths, playNext);
-	if (added <= 0) { showToast("Could not queue that"); return; }
+	if (added <= 0) { showToast(player::playProblem().empty() ? std::string("Could not queue that") : player::playProblem()); return; }
 	if (wasEmpty) { showToast("Playing: " + name); return; }
 	showToast(std::string(playNext ? "Playing next: " : "Added to queue: ") + name +
 		(added > 1 ? " (" + std::to_string(added) + " tracks)" : ""));
@@ -2262,10 +2487,14 @@ void libAddToPlaylistPicker() {
 		return;
 	}
 	if (paths.empty()) { showToast("Nothing to add there"); return; }
-	for (const std::string& p : paths)
-		if (smbnet::isRemote(p) || usbdrive::isUsbPath(p)) { showToast("Songs from the network or a USB drive can't be added to playlists yet"); return; }
+	std::vector<std::string> keep; // songs picked in the folder browser of a USB drive are saved by their drive id
+	for (const std::string& p : paths) {
+		if (usbdrive::isUsbPath(p)) { const std::string st = usbdrive::stablePath(p); if (!st.empty()) keep.push_back(st); }
+		else keep.push_back(p);
+	}
+	if (keep.empty()) { showToast("Nothing to add there"); return; }
 	g_lib.pickReturn = g_lib.mode;
-	g_lib.pick = makePickPlaylistView(paths, name);
+	g_lib.pick = makePickPlaylistView(keep, name);
 	g_lib.mode = M_PICK;
 	clampScroll(g_lib.pick);
 	ensureVisible(g_lib.pick);
@@ -2351,7 +2580,7 @@ void libPlaySelected() {
 		return;
 	}
 	if (player::playTracks(paths, 0)) { showToast("Playing: " + name); libClose(); }
-	else showToast("Nothing to play there");
+	else showToast(player::playProblem().empty() ? std::string("Nothing to play there") : player::playProblem());
 }
 
 void libMove(int d) {
@@ -2375,7 +2604,7 @@ void libJumpTo(int index) {
 
 bool rowOpensSomething(RowKind k) {
 	return k == R_DIR || k == R_ALBUM || k == R_ARTIST || k == R_GENRE || k == R_PLAYLIST ||
-		k == R_NETDIR || k == R_NETSETTINGS || k == R_FTPSETTINGS || k == R_SMB_ALBUMS || k == R_SMB_ARTISTS || k == R_SMB_GENRES || k == R_SMB_ALL || k == R_HOME_SHADERS || k == R_HOME_SEARCH || k == R_HOME_SETTINGS || (k >= R_HOME_FOLDERS && k <= R_HOME_ALL);
+		k == R_NETDIR || k == R_NETSETTINGS || k == R_FTPSETTINGS || k == R_USBLIB_DRIVE || k == R_USB_SEARCH || k == R_USB_ALBUMS || k == R_USB_ARTISTS || k == R_USB_GENRES || k == R_USB_ALL || k == R_USB_PLAYLISTS || k == R_SMB_SEARCH || k == R_SMB_ALBUMS || k == R_SMB_ARTISTS || k == R_SMB_GENRES || k == R_SMB_ALL || k == R_SMB_PLAYLISTS || k == R_HOME_SHADERS || k == R_HOME_SEARCH || k == R_HOME_SETTINGS || (k >= R_HOME_FOLDERS && k <= R_HOME_ALL);
 }
 
 // ============================================================================ track info panel
@@ -2676,6 +2905,23 @@ void lyricsShow(bool show) {
 		showToast("Lyrics off");
 	}
 }
+bool lyricsWantedNow() { return g_lyr.wanted; }
+
+void queueShow(bool show) {
+	if (!g_ready) return;
+	if (show) {
+		if (g_lib.open) return;
+		if (!player::hasTracks()) { showToast("Nothing in the queue yet"); return; }
+		g_lib.open = true;
+		if (g_lib.mode != M_MENU || g_lib.stack.empty()) libShowMenu();
+		libPush(makeQueueView());
+		View& t = cur();
+		t.scroll = fmaxf(0.0f, t.sel * ROW_H - listHeight() * 0.4f); // the playing song a little above the middle
+		clampScroll(t);
+		t.scrollDisp = t.scroll;
+	}
+	else if (onQueuePage()) libClose();
+}
 int autoCycleSeconds() { return g_autoSecs; }
 void bindShaders(const std::vector<std::string>* list, const int* current) { g_shList = list; g_shCur = current; }
 bool takeShaderRequest(std::string& path, bool& preview) {
@@ -2800,13 +3046,62 @@ Result update(const Input& in) {
 	g_touching = in.touching;
 
 	// ---- activity / timers
-	if (in.down != 0 || in.touching) g_hudTimer = HUD_SECONDS;
+	// Any press or touch shows the player overlay, except the buttons that do something else on the visualisation:
+	// L / R (previous / next shader), B (the scroller) and R3 (play mode, which has its own message)
+	const uint32_t NO_HUD = BTN_L | BTN_R | BTN_B | BTN_R3;
+	if ((in.down & ~NO_HUD) != 0 || in.touching) g_hudTimer = HUD_SECONDS;
 	else g_hudTimer = fmaxf(0.0f, g_hudTimer - dt);
 	if (player::trackChangeCounter() != g_lastTrackChange) {
 		g_lastTrackChange = player::trackChangeCounter();
 		if (player::configInt("hud_on_track", 1)) g_hudTimer = HUD_SECONDS; // (Settings: "Show player when a new track starts")
+		if (onQueuePage()) { // the playing queue is open: move the marker, keep where the user is looking
+			View& qv = g_lib.stack.back();
+			const int sel = qv.sel;
+			const float sc = qv.scroll;
+			qv = makeQueueView();
+			qv.sel = std::min(sel, (int)qv.rows.size() - 1);
+			qv.scroll = sc;
+			clampScroll(qv);
+			qv.scrollDisp = qv.scroll;
+		}
 	}
 	g_toastTimer = fmaxf(0.0f, g_toastTimer - dt);
+	{ // the main menu library changed (the share or a drive came or went, or a scan finished): a main menu page that is open follows it
+		static uint32_t lastAll = 0;
+		const uint32_t av = alllib::version();
+		if (av != lastAll) {
+			lastAll = av;
+			if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true;
+			if (g_lib.mode == M_MENU && !g_lib.stack.empty()) {
+				View& tv = g_lib.stack.back();
+				if (tv.merged && (tv.kind == PG_ALBUMS || tv.kind == PG_ARTISTS || tv.kind == PG_GENRES || tv.kind == PG_ALL)) {
+					const int oldSel = tv.sel;
+					const float oldScroll = tv.scroll;
+					const bool hadRow = oldSel >= 0 && oldSel < (int)tv.rows.size();
+					const std::string selLabel = hadRow ? tv.rows[oldSel].label : std::string();
+					const RowKind selKind = hadRow ? tv.rows[oldSel].kind : R_BACK;
+					View nv = (tv.kind == PG_ALL) ? makeAllSongs() : makeGroupList(tv.kind);
+					nv.sel = std::min(std::max(oldSel, 0), (int)nv.rows.size() - 1);
+					if (hadRow) for (size_t i = 0; i < nv.rows.size(); i++) if (nv.rows[i].kind == selKind && nv.rows[i].label == selLabel) { nv.sel = (int)i; break; } // stay on the same item
+					nv.scroll = oldScroll;
+					tv = std::move(nv);
+					clampScroll(tv);
+					tv.scrollDisp = tv.scroll;
+				}
+			}
+		}
+	}
+	{ // the menu shows whether Wi-Fi is on: look again every few seconds and refresh the home page when it changes
+		static float wifiTimer = 0.0f;
+		static int lastWifi = -1;
+		wifiTimer += dt;
+		if (wifiTimer >= 3.0f) {
+			wifiTimer = 0.0f;
+			const int now = wifiConnected() ? 1 : 0;
+			if (lastWifi != -1 && now != lastWifi && !g_lib.stack.empty()) g_lib.stack[0].dirty = true;
+			lastWifi = now;
+		}
+	}
 	if (g_eqSaveDelay > 0.0f) { // the equalizer was changed: write config.ini once things have settled
 		g_eqSaveDelay -= dt;
 		if (g_eqSaveDelay <= 0.0f) { g_eqSaveDelay = 0.0f; player::setConfigString("eq_gains", g_eqGainsText, true); }
@@ -2981,16 +3276,21 @@ Result update(const Input& in) {
 		if (d & BTN_LS_DOWN) libJumpTo((int)cur().rows.size() - 1);
 		{ // a pending "delete playlist" confirmation is cancelled as soon as the selection leaves that row
 			View& cv = cur();
-			if (cv.confirmDelete && (cv.sel < 0 || cv.sel >= (int)cv.rows.size() || cv.rows[cv.sel].kind != R_DELPLAYLIST)) {
+			if (cv.confirmDelete && (cv.sel < 0 || cv.sel >= (int)cv.rows.size() || (cv.rows[cv.sel].kind != R_DELPLAYLIST && cv.rows[cv.sel].kind != R_USB_FORGET))) {
 				cv.confirmDelete = false;
-				for (Row& r : cv.rows) if (r.kind == R_DELPLAYLIST) r.label = "Delete this playlist";
+				for (Row& r : cv.rows) {
+					if (r.kind == R_DELPLAYLIST) r.label = "Delete this playlist";
+					if (r.kind == R_USB_FORGET) r.label = "Forget this drive";
+				}
 			}
 		}
-		if (d & BTN_RS_RIGHT) libJumpLetter(+1);
-		if (d & BTN_RS_LEFT) libJumpLetter(-1);
+		if (g_repRsUp.fire(d & BTN_RS_UP, h & BTN_RS_UP, dt, 0.35f, 0.09f)) libMove(-1);     // right stick up / down: move through the list (the playing queue, mostly)
+		if (g_repRsDown.fire(d & BTN_RS_DOWN, h & BTN_RS_DOWN, dt, 0.35f, 0.09f)) libMove(+1);
+		if (d & BTN_RS_RIGHT) { if (!onQueuePage()) libJumpLetter(+1); }
+		if (d & BTN_RS_LEFT) { if (onQueuePage()) libClose(); else libJumpLetter(-1); }
 		if (d & BTN_L3) libQueueSelected(false);
 		if (d & BTN_A) libActivate(cur().sel);
-		if (d & BTN_B) libBack(true);
+		if (d & BTN_B) { if (onQueuePage()) libClose(); else libBack(true); }
 		if ((d & BTN_LEFT) && !eqConsumedLeftRight) libBack(false);
 		if ((d & BTN_RIGHT) && !eqConsumedLeftRight && cur().sel < (int)cur().rows.size() && rowOpensSomething(cur().rows[cur().sel].kind)) libActivate(cur().sel);
 		if (d & BTN_X) libPlaySelected();
@@ -3087,6 +3387,15 @@ Result update(const Input& in) {
 				clampScroll(uv);
 				uv.scrollDisp = uv.scroll;
 			}
+			if (g_lib.mode == M_MENU && !g_lib.stack.empty() && (g_lib.stack.back().kind == PG_USBLIBS || g_lib.stack.back().kind == PG_USBHOME)) { // "connected" / "not connected"
+				View& tv = g_lib.stack.back();
+				const int sel = tv.sel;
+				const std::string id = tv.driveId;
+				tv = (tv.kind == PG_USBLIBS) ? makeUsbLibsView() : makeUsbHome(id);
+				tv.sel = std::min(std::max(sel, 0), (int)tv.rows.size() - 1);
+				clampScroll(tv);
+				tv.scrollDisp = tv.scroll;
+			}
 			if (g_lib.mode == M_FOLDERS && usbdrive::isUsbPath(g_lib.dir) && !usbdrive::isMounted(g_lib.dir)) libShowMenu(); // browsing a drive that is gone
 		}
 	}
@@ -3105,6 +3414,7 @@ Result update(const Input& in) {
 			lyrics::Lyrics got;
 			if (lr.found && lyrics::fromText(lr.text, got, "lrclib.net")) {
 				g_lyr.data = got;
+				g_lyr.data.file = lrclib::cacheFileForSong(g_lyr.forPath); // saved by the lookup
 				g_lyr.linePos = 0.0f;
 				g_lyr.scroll = 0.0f;
 				showToast(got.timed ? "Lyrics found online" : "Lyrics found online (without timing, so shown as a page)");
@@ -3305,16 +3615,17 @@ void drawLibrary() {
 		case R_SAVEQUEUE: case R_NEWPLAYLIST: ic = IC_PLAYLIST; iconCol = textCol = C_ACCENT; break;
 		case R_PICKPLAYLIST: ic = IC_PLAYLIST; iconCol = C_ACCENT; break;
 		case R_RENAMEPLAYLIST: ic = IC_PLAYLIST; iconCol = textCol = C_ACCENT; break;
-		case R_DELPLAYLIST: { const Color red = { 1.0f, 0.45f, 0.45f, 1.0f }; ic = IC_CLOSE; iconCol = red; textCol = red; break; }
+		case R_DELPLAYLIST: case R_USB_FORGET: { const Color red = { 1.0f, 0.45f, 0.45f, 1.0f }; ic = IC_CLOSE; iconCol = red; textCol = red; break; }
 		case R_SETDIR: ic = IC_STAR; iconCol = textCol = isMusicFolder ? C_ACCENT : C_DIM; break;
 		case R_DIR: ic = isMusicFolder ? IC_STAR : IC_FOLDER; iconCol = isMusicFolder ? C_ACCENT : folderYellow; break;
 		case R_FILE: case R_TRACK: ic = isPlaying ? IC_PLAY : IC_NOTE; iconCol = textCol = isPlaying ? C_ACCENT : C_WHITE; break;
 		case R_HOME_FOLDERS: ic = IC_FOLDER; iconCol = folderYellow; break;
-		case R_HOME_ALBUMS: case R_ALBUM: case R_SMB_ALBUMS: ic = IC_ALBUM; iconCol = C_ACCENT; break;
-		case R_HOME_ARTISTS: case R_ARTIST: case R_SMB_ARTISTS: ic = IC_ARTIST; iconCol = C_ACCENT; break;
-		case R_HOME_GENRES: case R_GENRE: case R_SMB_GENRES: ic = IC_GENRE; iconCol = C_ACCENT; break;
+		case R_HOME_ALBUMS: case R_ALBUM: case R_SMB_ALBUMS: case R_USB_ALBUMS: ic = IC_ALBUM; iconCol = C_ACCENT; break;
+		case R_HOME_ARTISTS: case R_ARTIST: case R_SMB_ARTISTS: case R_USB_ARTISTS: ic = IC_ARTIST; iconCol = C_ACCENT; break;
+		case R_HOME_GENRES: case R_GENRE: case R_SMB_GENRES: case R_USB_GENRES: ic = IC_GENRE; iconCol = C_ACCENT; break;
+		case R_SMB_PLAYLISTS: case R_USB_PLAYLISTS: ic = IC_PLAYLIST; iconCol = C_ACCENT; break;
 		case R_HOME_PLAYLISTS: case R_PLAYLIST: ic = IC_PLAYLIST; iconCol = C_ACCENT; break;
-		case R_HOME_NETWORK: case R_HOME_SMB: ic = IC_FOLDER; iconCol = C_ACCENT; break;
+		case R_HOME_NETWORK: case R_HOME_SMB: case R_HOME_USBLIB: case R_USBLIB_DRIVE: ic = IC_FOLDER; iconCol = C_ACCENT; break;
 		case R_NETDIR: ic = IC_FOLDER; iconCol = folderYellow; break;
 		case R_NETSETTINGS: ic = IC_VIZ; iconCol = C_ACCENT; break;
 		case R_NETFIELD: ic = IC_VIZ; iconCol = C_DIM; break;
@@ -3324,11 +3635,17 @@ void drawLibrary() {
 		case R_NETCONNECT: ic = IC_PLAY; iconCol = C_ACCENT; textCol = C_ACCENT; break;
 		case R_HOME_USB: ic = IC_FOLDER; iconCol = C_ACCENT; break;
 		case R_USBDRIVE: ic = IC_FOLDER; iconCol = folderYellow; break;
+		case R_USBSCAN: ic = IC_VIZ; iconCol = usbscan::running() ? C_ACCENT : C_DIM; break;
 		case R_USBEJECT: ic = IC_CLOSE; iconCol = textCol = C_DIM; break;
 		case R_NETKEEP: ic = IC_STAR; iconCol = smbnet::keepCache() ? C_ACCENT : C_DIM; break;
-		case R_HOME_ALL: case R_SMB_ALL: ic = IC_NOTE; iconCol = C_ACCENT; break;
+		case R_HOME_ALL: case R_SMB_ALL: case R_USB_ALL: ic = IC_NOTE; iconCol = C_ACCENT; break;
 		case R_HOME_AUTO: ic = IC_VIZ; iconCol = g_autoSecs ? C_ACCENT : C_DIM; break;
-		case R_HOME_SEARCH: ic = IC_NOTE; iconCol = C_ACCENT; break;
+		case R_HOME_SEARCH: case R_SMB_SEARCH: case R_USB_SEARCH: ic = IC_NOTE; iconCol = C_ACCENT; break;
+		case R_QUEUE_NOW: ic = IC_PLAY; iconCol = textCol = C_ACCENT; break;
+		case R_QUEUE_ITEM: ic = IC_NOTE; iconCol = textCol = C_WHITE; break;
+		case R_QUEUE_LYRICS: ic = IC_NOTE; iconCol = C_ACCENT; break;
+		case R_HOME_RSMODE: ic = IC_VIZ; iconCol = player::configInt("rs_queue", 0) ? C_ACCENT : C_DIM; break;
+		case R_HOME_HIDENET: ic = IC_VIZ; iconCol = player::configInt("hide_net_offline", 0) ? C_ACCENT : C_DIM; break;
 		case R_HOME_HUDTRACK: ic = IC_VIZ; iconCol = player::configInt("hud_on_track", 1) ? C_ACCENT : C_DIM; break;
 		case R_HOME_SHFADE: ic = IC_VIZ; iconCol = player::configInt("shader_fade", 1) ? C_ACCENT : C_DIM; break;
 		case R_HOME_SHTOAST: ic = IC_VIZ; iconCol = player::configInt("shader_toast", 1) ? C_ACCENT : C_DIM; break;
@@ -3360,7 +3677,7 @@ void drawLibrary() {
 			ic = IC_EQ;
 			iconCol = (equalizer::gain(r.ref) == 0) ? C_DIM : C_ACCENT;
 			break;
-		case R_HOME_RESUME: ic = IC_PLAY; iconCol = C_DIM; break;
+		case R_HOME_RESUME: ic = IC_PLAY; iconCol = player::configInt("resume_play", 0) ? C_ACCENT : C_DIM; break; // blue when the music keeps playing on launch
 		case R_HOME_RESCAN: ic = IC_REPEAT; iconCol = C_DIM; textCol = C_DIM; break;
 		}
 		if (sel && textCol.r == C_DIM.r) textCol = C_WHITE;
@@ -3544,6 +3861,7 @@ void drawInfo() {
 	add(left, "Disc", t.disc);
 	add(left, "Year", t.year);
 	add(left, "Genre", t.genre);
+	if (!g_lyr.data.file.empty() && g_lyr.forPath == player::currentPath()) add(left, "Lyrics file", player::baseName(g_lyr.data.file)); // which .lrc file the lyrics come from (to find it on a computer)
 	add(left, "Comment", t.comment);
 
 	char buf[64];

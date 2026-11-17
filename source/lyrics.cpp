@@ -215,7 +215,7 @@ bool load(const std::string& trackPath, Lyrics& out) {
 			std::string raw;
 			if (!readFile(base + ext, raw)) continue;
 			parseText(toUtf8(raw), out);
-			if (out.found) { out.source = "lrc file"; return true; }
+			if (out.found) { out.source = "lrc file"; out.file = base + ext; return true; }
 			out = Lyrics();
 		}
 	}
@@ -230,7 +230,7 @@ bool load(const std::string& trackPath, Lyrics& out) {
 	std::string cached;
 	if (lrclib::cachedForSong(trackPath, cached)) {
 		parseText(toUtf8(cached), out);
-		if (out.found) { out.source = "lrclib.net (saved)"; return true; }
+		if (out.found) { out.source = "lrclib.net (saved)"; out.file = lrclib::cacheFileForSong(trackPath); return true; }
 	}
 	out = Lyrics();
 	return false;

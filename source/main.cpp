@@ -52,8 +52,13 @@ Hold ZR + Right Stick X: Cycle material (Metallic/Chrome/Neon/Matte)
 #include "shaderpick.h"
 #include "ui.h"
 #include "db.h"
+#include "netstatus.h"
 #include "smbscan.h"
 #include "smblib.h"
+#include "usbscan.h"
+#include "usblib.h"
+#include "alllib.h"
+#include "smbprobe.h"
 #include "library.h"
 #include "model3d.h"
 
@@ -780,7 +785,7 @@ void toggle_led(LedState patternType = LED_SOLID) {
 
 // Is Wi-Fi on and connected to a network? (asks the system's network service, so it also works when Wi-Fi is switched on later)
 static bool g_nifmReady = false;
-static bool wifiConnected() {
+bool wifiConnected() {
 	if (!g_nifmReady) return true; // cannot tell: let the server try anyway
 	u32 ip = 0;
 	return R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) && ip != 0;
@@ -1474,6 +1479,7 @@ int main(int argc, char* argv[]) {
 	if (audioInitialized) restoreEqualizerSettings(); // (needs the settings player::init just loaded)
 	db::init("sdmc:/switch/shaderfun/library.db"); // the music catalogue (see db.h)
 	smblib::init();                                // loads the network library from it (see smblib.h)
+	usblib::init();                                // ... and the USB libraries (see usblib.h)
 	library::init("sdmc:/switch/shaderfun/library.idx");
 	library::startScan(player::musicFolder()); // indexes the music folder in the background (cached after the first run)
 	bool plReady = false;
@@ -1551,6 +1557,9 @@ int main(int argc, char* argv[]) {
 		frameCount++;
 
 		smbscan::poll(); // shows a message when the SMB scan has finished
+		usbscan::poll(); // ... and the USB drive scan
+		smbprobe::poll(); // is the network share reachable? (checked in the background)
+		alllib::poll();  // keeps the main menu library up to date with what is connected
 
 		// Save the state every 20 s, so a crash or a power-off loses very little
 		{
@@ -1578,7 +1587,8 @@ int main(int argc, char* argv[]) {
 				{ HidNpadButton_StickR, ui::BTN_R3 }, { HidNpadButton_StickL, ui::BTN_L3 },
 				{ HidNpadButton_StickLUp, ui::BTN_LS_UP }, { HidNpadButton_StickLDown, ui::BTN_LS_DOWN },
 				{ HidNpadButton_StickLLeft, ui::BTN_LS_LEFT }, { HidNpadButton_StickLRight, ui::BTN_LS_RIGHT },
-				{ HidNpadButton_StickRLeft, ui::BTN_RS_LEFT }, { HidNpadButton_StickRRight, ui::BTN_RS_RIGHT } };
+				{ HidNpadButton_StickRLeft, ui::BTN_RS_LEFT }, { HidNpadButton_StickRRight, ui::BTN_RS_RIGHT },
+				{ HidNpadButton_StickRUp, ui::BTN_RS_UP }, { HidNpadButton_StickRDown, ui::BTN_RS_DOWN } };
 			static Uint32 lastUiTicks = SDL_GetTicks();
 			const Uint32 nowUiTicks = SDL_GetTicks();
 			const u64 kHeld = padGetButtons(&pad);
@@ -1731,8 +1741,9 @@ int main(int argc, char* argv[]) {
 				static bool lyricsArmed = true;
 				if (abs(stick.x) < DEAD / 2) lyricsArmed = true;
 				if (lyricsArmed && !lookHeld && !matHeld && !menuOpen) {
-					if (stick.x > DEAD) { lyricsArmed = false; ui::lyricsShow(true); }
-					else if (stick.x < -DEAD) { lyricsArmed = false; ui::lyricsShow(false); }
+					const bool queueMode = player::configInt("rs_queue", 0) != 0; // Settings: "Right stick left / right"
+					if (stick.x > DEAD) { lyricsArmed = false; if (queueMode) ui::queueShow(true); else ui::lyricsShow(true); }
+					else if (stick.x < -DEAD) { lyricsArmed = false; if (queueMode) ui::queueShow(false); else ui::lyricsShow(false); }
 				}
 			}
 
@@ -2016,6 +2027,8 @@ int main(int argc, char* argv[]) {
 	smbnet::abortStreams(); // never wait for network data while the music is being closed
 	player::shutdown();    // also saves the last track, position and queue
 	smbnet::trace("exit: stopping the network");
+	usbscan::shutdown();   // (before the drives are unmounted and the database is closed)
+	smbprobe::shutdown();
 	smbscan::cancel();
 	smbnet::shutdown();    // must happen BEFORE ftp_cleanup(): that closes the socket service the SMB connection needs
 	db::shutdown();        // (after the network thread has stopped, which may still hand over rows)

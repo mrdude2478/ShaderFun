@@ -1,84 +1,79 @@
+// Rotating Pulse (fixed atan seam)
 precision mediump float;
 
-uniform vec3 iResolution;
+uniform vec3  iResolution;
 uniform float iTime;
 varying vec2 vUV;
 
+#define TAU 6.28318530718
+#define PI  3.14159265359
+
 const float TUNNEL_SIZE  = 0.25;
 const float TUNNEL_SPEED = 0.5;
-const float SPIN_SPEED = 1.0;  // Controls how fast the tunnel spins
-const float PI = 3.141592;
+const float SPIN_SPEED   = 1.0;
 
 vec2 tunnel(vec2 uv, float size, float time, float spin)
 {
     vec2 p = (uv - 0.5) * 2.0;
     p.x *= iResolution.x / iResolution.y;
-    
-    // Apply rotation for spinning effect
-    float cosSpin = cos(spin);
-    float sinSpin = sin(spin);
-    p = mat2(cosSpin, -sinSpin, sinSpin, cosSpin) * p;
-    
+
+    // Spin
+    p = mat2(cos(spin), -sin(spin), sin(spin), cos(spin)) * p;
+
     float a = atan(p.y, p.x);
     float r = length(p);
-    return vec2(a / (2.0 * PI), time + (size / r));
+
+    // Small epsilon on r avoids division-by-zero at the center
+    return vec2(a / TAU, time + size / (r + 0.001));
 }
 
 vec3 tunnelTexture(vec2 uv)
 {
-    
-    // Colorful animated stripes
-    float stripes = sin(uv.x * 30.0 + iTime * 5.0) * 0.5 + 0.5;
-    float stripes2 = cos(uv.x * 15.0 - iTime * 3.0) * 0.3 + 0.7;
-    float pulse = sin(iTime * 2.0) * 0.2 + 0.8;
-    
-    // Animated colors with phase shifts
-    float hue = iTime * 0.4;
-    vec3 color1 = 0.5 + 0.5 * cos(hue + vec3(0.0, 2.0, 4.0));
-    vec3 color2 = 0.5 + 0.5 * cos(hue + 1.57 + vec3(0.0, 2.0, 4.0));
-    vec3 color3 = 0.5 + 0.5 * cos(hue + 3.14 + vec3(0.0, 2.0, 4.0));
-    
-    // Radial gradient for depth with spiral effect
-    float spiral = sin(uv.x * 8.0 + uv.y * 20.0 + iTime * 4.0) * 0.3 + 0.7;
+    // FIXED: TAU-multiples ensure continuity across the atan seam
+    float stripes  = sin(uv.x * TAU * 5.0 + iTime * 5.0) * 0.5 + 0.5;
+    float stripes2 = cos(uv.x * TAU * 2.0 - iTime * 3.0) * 0.3 + 0.7;
+    float pulse    = sin(iTime * 2.0) * 0.2 + 0.8;
+
+    // Hue cycles
+    float hue    = iTime * 0.4;
+    vec3 color1  = 0.5 + 0.5 * cos(hue + vec3(0.0, 2.0, 4.0));
+    vec3 color2  = 0.5 + 0.5 * cos(hue + 1.57 + vec3(0.0, 2.0, 4.0));
+    vec3 color3  = 0.5 + 0.5 * cos(hue + 3.14 + vec3(0.0, 2.0, 4.0));
+
+    // FIXED: spiral x-frequency is TAU * 1
+    float spiral = sin(uv.x * TAU + uv.y * 20.0 + iTime * 4.0) * 0.3 + 0.7;
     float radial = 1.0 - smoothstep(0.0, 1.0, uv.y) * spiral;
-    
+
     return mix(mix(color1, color2, stripes), color3, stripes2) * radial * pulse;
 }
 
 void main()
 {
     vec2 uv = vUV;
-    
-    // Calculate spin angle based on time
     float spinAngle = iTime * SPIN_SPEED;
-    
-    // Apply tunnel distortion with spinning
+
+    // Tunnel distortion
     vec2 tunnelUV = tunnel(uv, TUNNEL_SIZE, iTime * TUNNEL_SPEED, spinAngle);
-    
-    // Repeat the texture vertically for infinite tunnel
     tunnelUV.y = fract(tunnelUV.y);
-    
+
     vec3 color = tunnelTexture(tunnelUV);
-    
-    // Add rotating scanlines that match the spin
+
+    // Scanlines (uses tunnelUV.y, which is fine)
     float scanline = sin(tunnelUV.y * 600.0 + spinAngle * 10.0) * 0.15 + 0.85;
     color *= scanline;
-    
-    // Spinning center vortex effect
-    vec2 center = (vUV - 0.5) * 2.0;
+
+    // Vortex center
+    vec2 center = (uv - 0.5) * 2.0;
     center.x *= iResolution.x / iResolution.y;
-    
-    // Rotate the center coordinates for vortex effect
-    float vortexSpin = iTime * 3.0;
-    float cosVortex = cos(vortexSpin);
-    float sinVortex = sin(vortexSpin);
-    vec2 vortexUV = mat2(cosVortex, -sinVortex, sinVortex, cosVortex) * center;
-    
-    float vortex = sin(length(vortexUV) * 50.0 - iTime * 10.0) * 0.3 + 0.7;
-    float centerGlow = 1.0 - smoothstep(0.0, 1.5, length(center));
+
+    float vs = iTime * 3.0;
+    vec2 vortexUV = mat2(cos(vs), -sin(vs), sin(vs), cos(vs)) * center;
+
+    float vortex      = sin(length(vortexUV) * 50.0 - iTime * 10.0) * 0.3 + 0.7;
+    float centerGlow  = 1.0 - smoothstep(0.0, 1.5, length(center));
     color += vec3(0.4, 0.3, 0.8) * centerGlow * vortex * 0.4;
-    
-    // Add some spinning particles/dust
+
+    // Particles
     for (int i = 0; i < 5; i++) {
         float idx = float(i);
         vec2 particlePos = vec2(
@@ -87,17 +82,17 @@ void main()
         );
         float particleDist = length(center - particlePos);
         float particleSize = 0.01 + 0.005 * sin(iTime * 5.0 + idx);
-        
+
         if (particleDist < particleSize) {
             float intensity = 1.0 - particleDist / particleSize;
             vec3 particleColor = 0.5 + 0.5 * cos(iTime * 0.5 + idx + vec3(0.0, 2.0, 4.0));
             color += particleColor * intensity * 0.8;
         }
     }
-    
-    // Dynamic vignette that pulses with the spin
+
+    // Vignette
     float vignette = 1.0 - length(center) * (0.4 + 0.1 * sin(iTime * 2.0));
     color *= vignette;
-    
+
     gl_FragColor = vec4(color, 1.0);
 }

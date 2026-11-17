@@ -9,7 +9,7 @@
 namespace db {
 namespace {
 
-const int SCHEMA_VERSION = 1; // stored in the file (PRAGMA user_version); a different number means "start again"
+const int SCHEMA_VERSION = 2; // stored in the file (PRAGMA user_version); a different number means "start again"
 
 SDL_Thread* g_thread = nullptr;
 SDL_mutex* g_mu = nullptr;
@@ -20,13 +20,30 @@ bool g_opened = false;   // the thread has finished trying to open the file
 bool g_ready = false;    // ... and it worked
 std::string g_path;
 
+// USB drives that have been scanned. The id is made from the label, maker, product, file system and size of the drive
+// (the serial number is not used: not every drive can report it), and is part of every song path: usb://<id>/Music/a.mp3
+bool createDrivesTable(sqlite3* d) {
+	bool ok = exec(d,
+		"CREATE TABLE IF NOT EXISTS drives("
+		" id TEXT PRIMARY KEY,"
+		" label TEXT,"                     // the name shown in the menu (the volume label)
+		" maker TEXT, product TEXT, fs_type TEXT,"
+		" capacity INTEGER,"
+		" first_seen INTEGER, last_seen INTEGER,"
+		" last_scan INTEGER,"              // when the last complete scan finished
+		" songs INTEGER);");
+	ok = ok && exec(d, "CREATE INDEX IF NOT EXISTS tracks_drive ON tracks(drive_id);");
+	return ok;
+}
+
 bool createSchema(sqlite3* d) {
 	bool ok = true;
 	ok = ok && exec(d, "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);");
 	ok = ok && exec(d,
 		"CREATE TABLE IF NOT EXISTS tracks("
 		" id INTEGER PRIMARY KEY,"
-		" source TEXT NOT NULL,"           // 'smb' (later 'sd', 'usb')
+		" source TEXT NOT NULL,"           // 'smb' or 'usb' (later 'sd')
+		" drive_id TEXT,"                  // usb: which drive (see the drives table), otherwise NULL
 		" path TEXT NOT NULL,"             // the path as the app uses it, e.g. smb://Music/Artist/Album/01 Song.mp3
 		" folder TEXT NOT NULL,"           // the path without the file name
 		" filename TEXT NOT NULL,"
@@ -43,6 +60,7 @@ bool createSchema(sqlite3* d) {
 		" UNIQUE(source, path));");
 	ok = ok && exec(d, "CREATE INDEX IF NOT EXISTS tracks_folder ON tracks(source, folder);");
 	ok = ok && exec(d, "CREATE INDEX IF NOT EXISTS tracks_tags ON tracks(source, tags_state);");
+	ok = ok && createDrivesTable(d);
 	ok = ok && exec(d, ("PRAGMA user_version=" + std::to_string(SCHEMA_VERSION) + ";").c_str());
 	return ok;
 }
@@ -69,6 +87,9 @@ sqlite3* openDatabase() {
 			const int ver = readUserVersion(d);
 			if (ver == SCHEMA_VERSION) return d;
 			if (ver == 0 && createSchema(d)) return d; // a new file
+			if (ver == 1) { // made by the previous version: add what is new and keep everything else (no rescan of the share)
+				if (exec(d, "ALTER TABLE tracks ADD COLUMN drive_id TEXT;") && createDrivesTable(d) && exec(d, "PRAGMA user_version=2;")) return d;
+			}
 			printf("db: %s is not usable (version %d), starting a new one\n", g_path.c_str(), ver);
 		}
 		if (d) sqlite3_close(d);

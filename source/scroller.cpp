@@ -30,7 +30,7 @@ Touchscreen:
 namespace {
 
 // ---------------------------------------------------------------- tunables
-const int   FONT_SIZE = 100;
+const int   FONT_SIZE = 60;
 const float WAVE_AMPLITUDE = 50.0f;        // pixels
 const float WAVE_FREQUENCY = 0.20f;        // radians per character
 const float PHASE_SPEED = 0.07f * 60.0f;   // radians per second (wave animation)
@@ -48,7 +48,7 @@ const float TOUCH_SWELL = 1.2f;            // extra amplitude next to the finger
 const float TOUCH_MAGNET = 0.35f;          // 0..1, how strongly letters are pulled towards the finger
 
 const char* DEFAULT_TEXT =
-	"                     $ *** Created by ***      #    *** MrDude ***      #";
+	"                                   $       *** Created by ***            #            *** MrDude ***                #";
 
 // ---------------------------------------------------------------- state
 struct Glyph {

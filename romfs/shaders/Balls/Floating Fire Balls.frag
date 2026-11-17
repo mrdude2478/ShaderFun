@@ -79,7 +79,7 @@ void main() {
         
         // Animated ball positions
         vec2 ballPos = vec2(
-            0.3 + 0.4 * sin(time * 0.8 + idx * 2.094),
+            0.5 + 0.4 * sin(time * 0.8 + idx * 2.094),   // was 0.3
             0.4 + 0.3 * cos(time * 0.6 + idx * 1.047)
         );
         
@@ -169,7 +169,7 @@ void main() {
     for (int i = 0; i < 3; i++) {
         float idx = float(i);
         vec2 ballPos = vec2(
-            0.3 + 0.4 * sin(time * 0.8 + idx * 2.094),
+            0.5 + 0.4 * sin(time * 0.8 + idx * 2.094),   // was 0.3
             0.4 + 0.3 * cos(time * 0.6 + idx * 1.047)
         );
         float dist = length(heatUV - ballPos);

@@ -32,7 +32,7 @@ void main()
     dstepf = 0.0;
     
     // Reduced iteration count for Switch performance
-	for(float i=0.; i<120.; i++)	
+	for(float i=0.; i<60.; i++)	
 	{
         if(layers>15. || col.x > 1. || t>5.6) break;
         sp = ro + rd*t;
@@ -43,7 +43,7 @@ void main()
             col += aD*aD*(3.-2.*aD)/(1. + t*t*0.25)*.2; 
             layers++; 
 		}
-        t += max(d*.7, thD*1.5) * dstepf; 
+        t += max(d*2.5, thD*1.5) * dstepf; 
 	}
     col = max(col, 0.);
     col = mix(col, vec3(min(col.x*1.5, 1.), pow(col.x, 2.5), pow(col.x, 12.)), 
