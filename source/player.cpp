@@ -879,6 +879,66 @@ int enqueue(const std::vector<std::string>& tracksIn, bool playNext) {
 	return k;
 }
 
+// ------------------------------------------------------------------ changing the queue (the queue page)
+// pos = a position in play order (see playOrderPaths())
+bool queueRemove(int pos) {
+	const int n = (int)g_order.size();
+	if (pos < 0 || pos >= n) return false;
+	const int qi = g_order[pos];
+	const bool wasCurrent = (pos == g_pos);
+	g_queue.erase(g_queue.begin() + qi);
+	if (qi < (int)g_chosen.size()) g_chosen.erase(g_chosen.begin() + qi);
+	g_order.erase(g_order.begin() + pos);
+	for (int& v : g_order) if (v > qi) v--; // the songs after it move up by one
+	g_queueDirty = true;
+	if (pos < g_pos) g_pos--;
+	if (g_order.empty()) { g_pos = -1; stop(); return true; }
+	if (wasCurrent) { // the song that was after it takes its place
+		if (g_pos >= (int)g_order.size()) {
+			if (g_mode == MODE_ONCE) { g_pos = (int)g_order.size() - 1; stop(); return true; } // it was the last one
+			g_pos = 0;
+		}
+		loadCurrentOrSkip();
+	}
+	return true;
+}
+
+bool queuePlayNext(int pos) {
+	const int n = (int)g_order.size();
+	if (pos < 0 || pos >= n || g_pos < 0 || pos == g_pos) return false;
+	if (g_mode == MODE_SHUFFLE) { // the play order is its own list
+		const int qi = g_order[pos];
+		g_order.erase(g_order.begin() + pos);
+		if (pos < g_pos) g_pos--;
+		g_order.insert(g_order.begin() + g_pos + 1, qi);
+	}
+	else { // in order modes the play order is the queue itself
+		const std::string s = g_queue[pos];
+		const char ch = pos < (int)g_chosen.size() ? g_chosen[pos] : 1;
+		g_queue.erase(g_queue.begin() + pos);
+		if (pos < (int)g_chosen.size()) g_chosen.erase(g_chosen.begin() + pos);
+		if (pos < g_pos) g_pos--;
+		g_queue.insert(g_queue.begin() + g_pos + 1, s);
+		g_chosen.insert(g_chosen.begin() + g_pos + 1, ch);
+		g_order.resize(g_queue.size());
+		for (size_t i = 0; i < g_order.size(); i++) g_order[i] = (int)i;
+	}
+	g_queueDirty = true;
+	return true;
+}
+
+void queueClear() {
+	const int qi = currentQueueIndex();
+	if (qi < 0) { g_queue.clear(); g_chosen.clear(); g_order.clear(); g_pos = -1; g_queueDirty = true; return; }
+	const std::string keep = g_queue[qi]; // the song that is playing stays, so the music does not stop
+	const char ch = qi < (int)g_chosen.size() ? g_chosen[qi] : 1;
+	g_queue.assign(1, keep);
+	g_chosen.assign(1, ch);
+	g_order.assign(1, 0);
+	g_pos = 0;
+	g_queueDirty = true;
+}
+
 // ================================================================== transport
 void play() {
 	if (g_order.empty() || g_loading) return;
@@ -1002,6 +1062,12 @@ const std::string& currentPath() {
 	if (!g_curLocal.empty()) return g_curLocal;
 	const int qi = currentQueueIndex();
 	return qi >= 0 ? g_queue[qi] : g_emptyString;
+}
+// The queue entry of the song that is playing: the path it was queued with ("smb://..." for a network song), where currentPath()
+// is the file that is really being played (for a network song: its copy in the cache folder).
+std::string currentSourcePath() {
+	const int qi = currentQueueIndex();
+	return qi >= 0 ? g_queue[qi] : std::string();
 }
 bool isLoading() { return g_loading; }
 float loadProgress() { return g_loading ? (g_loadStream ? smbnet::streamProgress(g_loadingPath) : smbnet::fetchProgress(g_loadingPath)) : -1.0f; }

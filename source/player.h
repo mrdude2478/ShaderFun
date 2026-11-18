@@ -63,6 +63,9 @@ bool playTracks(const std::vector<std::string>& tracks, int startIndex); // queu
 std::vector<std::string> queuePaths();       // the current queue in its original order
 std::vector<std::string> playOrderPaths();   // the queue in the order it is played (shuffle included): what next / previous follow
 bool playOrderIndex(int pos);                // jump to this position of playOrderPaths() and play it
+bool queueRemove(int pos);                   // take the song at this play-order position out of the queue (the next one plays if it was the current song)
+bool queuePlayNext(int pos);                 // move the song at this position to right after the current one
+void queueClear();                           // empty the queue except the song that is playing
 // Only the queue entries YOU picked (played an album/folder/playlist, or added with enqueue).
 // The tracks the player loads by itself at start-up are left out, so they never end up in a saved playlist.
 std::vector<std::string> chosenQueuePaths();
@@ -99,6 +102,7 @@ double duration();           // seconds, 0 when unknown
 int queueIndex();            // 0-based position in play order, -1 if none
 int queueSize();
 const std::string& currentPath();
+std::string currentSourcePath();   // the path the song was queued with: for a network song "smb://...", where currentPath() is its copy in the cache folder
 std::string title();         // tag title or file name
 std::string subtitle();      // artist (- album) or the folder name
 std::string nowPlayingText();// "Artist - Title" for the scroller

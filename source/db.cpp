@@ -14,7 +14,9 @@ const int SCHEMA_VERSION = 2; // stored in the file (PRAGMA user_version); a dif
 SDL_Thread* g_thread = nullptr;
 SDL_mutex* g_mu = nullptr;
 SDL_cond* g_cv = nullptr;
-std::deque<std::function<void(sqlite3*)>> g_jobs;
+struct Job { std::function<void(sqlite3*)> fn; bool history = false; };
+std::deque<Job> g_jobs;
+bool g_histReady = false;
 bool g_quit = false;
 bool g_opened = false;   // the thread has finished trying to open the file
 bool g_ready = false;    // ... and it worked
@@ -75,6 +77,58 @@ int readUserVersion(sqlite3* d) {
 	return v;
 }
 
+const int HISTORY_VERSION = 1;
+
+std::string historyPath() {
+	const size_t slash = g_path.rfind('/');
+	return (slash == std::string::npos ? std::string() : g_path.substr(0, slash + 1)) + "history.db";
+}
+
+bool createHistorySchema(sqlite3* d) {
+	bool ok = exec(d,
+		"CREATE TABLE IF NOT EXISTS plays("
+		" id INTEGER PRIMARY KEY,"
+		" played_at INTEGER NOT NULL,"    // seconds since 1970, when the play was logged
+		" path TEXT NOT NULL,"            // how to play it (usb songs: usb://<drive id>/...)
+		" song_key TEXT NOT NULL,"        // lower case artist|title: the same song from two places counts together
+		" title TEXT, artist TEXT, album TEXT,"   // copied when the play was logged
+		" seconds INTEGER,"               // how long it had been listened to
+		" source TEXT);");                // sd / smb / usb
+	ok = ok && exec(d, "CREATE INDEX IF NOT EXISTS plays_key ON plays(song_key);");
+	ok = ok && exec(d, "CREATE INDEX IF NOT EXISTS plays_time ON plays(played_at);");
+	ok = ok && exec(d, ("PRAGMA user_version=" + std::to_string(HISTORY_VERSION) + ";").c_str());
+	return ok;
+}
+
+// The history is irreplaceable: it is never deleted. A file that cannot be read is renamed, one from a newer version is left alone.
+sqlite3* openHistory() {
+	const std::string path = historyPath();
+	for (int attempt = 0; attempt < 2; attempt++) {
+		sqlite3* hd = nullptr;
+		if (sqlite3_open_v2(path.c_str(), &hd, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) == SQLITE_OK) {
+			exec(hd, "PRAGMA journal_mode=DELETE;");
+			exec(hd, "PRAGMA synchronous=FULL;"); // a play is rare and precious: wait until it is really on the card
+			const int ver = readUserVersion(hd);
+			if (ver == HISTORY_VERSION) return hd;
+			if (ver == 0 && createHistorySchema(hd)) return hd; // a new file
+			if (ver > HISTORY_VERSION) {
+				printf("db: %s was made by a newer version (%d): the history is not used, the file is left alone\n", path.c_str(), ver);
+				sqlite3_close(hd);
+				return nullptr;
+			}
+		}
+		if (hd) sqlite3_close(hd);
+		if (attempt == 0) { // unreadable: keep it for a look, start a new one
+			const std::string bad = path + ".bad";
+			remove(bad.c_str());
+			rename(path.c_str(), bad.c_str());
+			remove((path + "-journal").c_str());
+			printf("db: %s could not be read, moved to %s\n", path.c_str(), bad.c_str());
+		}
+	}
+	return nullptr;
+}
+
 // Opens the file, or starts a new one when it is damaged or was made by another version of the app.
 sqlite3* openDatabase() {
 	for (int attempt = 0; attempt < 2; attempt++) {
@@ -101,8 +155,10 @@ sqlite3* openDatabase() {
 
 int threadMain(void*) {
 	sqlite3* d = openDatabase();
+	sqlite3* hist = d ? openHistory() : nullptr;
 	SDL_LockMutex(g_mu);
 	g_ready = (d != nullptr);
+	g_histReady = (hist != nullptr);
 	g_opened = true;
 	SDL_CondBroadcast(g_cv);
 	SDL_UnlockMutex(g_mu);
@@ -112,14 +168,17 @@ int threadMain(void*) {
 	while (true) {
 		while (g_jobs.empty() && !g_quit) SDL_CondWait(g_cv, g_mu);
 		if (g_jobs.empty() && g_quit) break; // finished: everything that was posted has run
-		std::function<void(sqlite3*)> job = std::move(g_jobs.front());
+		Job job = std::move(g_jobs.front());
 		g_jobs.pop_front();
 		SDL_UnlockMutex(g_mu);
-		job(d);
+		if (!job.history) job.fn(d);
+		else if (hist) job.fn(hist);
 		SDL_LockMutex(g_mu);
 	}
 	g_ready = false;
+	g_histReady = false;
 	SDL_UnlockMutex(g_mu);
+	if (hist) sqlite3_close(hist);
 	sqlite3_close(d);
 	return 0;
 }
@@ -169,12 +228,33 @@ bool post(std::function<void(sqlite3*)> job) {
 	bool queued = false;
 	SDL_LockMutex(g_mu);
 	if (g_ready && !g_quit) {
-		g_jobs.push_back(std::move(job));
+		g_jobs.push_back(Job{ std::move(job), false });
 		SDL_CondSignal(g_cv);
 		queued = true;
 	}
 	SDL_UnlockMutex(g_mu);
 	return queued;
+}
+
+bool postHistory(std::function<void(sqlite3*)> job) {
+	if (!g_mu) return false;
+	bool queued = false;
+	SDL_LockMutex(g_mu);
+	if (g_ready && g_histReady && !g_quit) {
+		g_jobs.push_back(Job{ std::move(job), true });
+		SDL_CondSignal(g_cv);
+		queued = true;
+	}
+	SDL_UnlockMutex(g_mu);
+	return queued;
+}
+
+bool historyReady() {
+	if (!g_mu) return false;
+	SDL_LockMutex(g_mu);
+	const bool r = g_histReady && !g_quit;
+	SDL_UnlockMutex(g_mu);
+	return r;
 }
 
 namespace {

@@ -58,6 +58,7 @@ Hold ZR + Right Stick X: Cycle material (Metallic/Chrome/Neon/Matte)
 #include "usbscan.h"
 #include "usblib.h"
 #include "alllib.h"
+#include "history.h"
 #include "smbprobe.h"
 #include "library.h"
 #include "model3d.h"
@@ -1480,6 +1481,7 @@ int main(int argc, char* argv[]) {
 	db::init("sdmc:/switch/shaderfun/library.db"); // the music catalogue (see db.h)
 	smblib::init();                                // loads the network library from it (see smblib.h)
 	usblib::init();                                // ... and the USB libraries (see usblib.h)
+	history::init();                               // the play history (its own file, see history.h)
 	library::init("sdmc:/switch/shaderfun/library.idx");
 	library::startScan(player::musicFolder()); // indexes the music folder in the background (cached after the first run)
 	bool plReady = false;
@@ -1559,6 +1561,12 @@ int main(int argc, char* argv[]) {
 		smbscan::poll(); // shows a message when the SMB scan has finished
 		usbscan::poll(); // ... and the USB drive scan
 		smbprobe::poll(); // is the network share reachable? (checked in the background)
+		{ // the play history counts how long you really listen to a song
+			static uint32_t lastHistTick = SDL_GetTicks();
+			const uint32_t nowHist = SDL_GetTicks();
+			history::update((nowHist - lastHistTick) / 1000.0f);
+			lastHistTick = nowHist;
+		}
 		alllib::poll();  // keeps the main menu library up to date with what is connected
 
 		// Save the state every 20 s, so a crash or a power-off loses very little

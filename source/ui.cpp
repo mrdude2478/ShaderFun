@@ -17,6 +17,8 @@
 #include "usbscan.h"   // scanning a USB drive into the database (USB page)
 #include "usblib.h"    // the USB libraries (loaded from the database)
 #include "alllib.h"    // the main menu library: SD card + connected network share + connected USB drives
+#include "history.h"   // the play history (recently / most played)
+#include "trackindex.h" // find a song in the libraries (go to its album / artist)
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -698,11 +700,11 @@ const float EQ_TRACK_X0 = 190.0f, EQ_TRACK_X1 = 560.0f, EQ_VALUE_X = 575.0f; // 
 // ============================================================================ library
 enum RowKind {
 	R_UP, R_PLAYDIR, R_SETDIR, R_DIR, R_FILE,                                   // folder browser
-	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, R_NETSCAN, R_USBSCAN, R_USBLIB_DRIVE, R_USB_SEARCH, R_USB_ALBUMS, R_USB_ARTISTS, R_USB_GENRES, R_USB_ALL, R_USB_PLAYLISTS, R_USB_FORGET, R_QUEUE_ITEM, R_QUEUE_NOW, R_QUEUE_LYRICS, R_SMB_SEARCH, R_SMB_ALBUMS, R_SMB_ARTISTS, R_SMB_GENRES, R_SMB_ALL, R_SMB_PLAYLISTS, R_FTPSETTINGS, R_FTPFIELD, R_USBDRIVE, R_USBEJECT, R_SHADER, R_SEARCHAGAIN, // library views
-	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_SMB, R_HOME_USBLIB, R_HOME_USB, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT, R_HOME_SHADERS, R_HOME_SHORDER, R_HOME_SHSCOPE, R_HOME_SEARCH, R_HOME_ONLINELYR, R_HOME_SETTINGS, R_HOME_SHTOAST, R_HOME_SHFADE, R_HOME_HUDTRACK, R_HOME_HIDENET, R_HOME_RSMODE,
+	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, R_NETSCAN, R_USBSCAN, R_USBLIB_DRIVE, R_USB_SEARCH, R_USB_ALBUMS, R_USB_ARTISTS, R_USB_GENRES, R_USB_ALL, R_USB_PLAYLISTS, R_USB_FORGET, R_QUEUE_ITEM, R_QUEUE_NOW, R_QUEUE_LYRICS, R_SONG_ALBUM, R_SONG_ARTIST, R_SONG_FOLDER, R_SONG_SCAN, R_SONG_PLAYNEXT, R_SONG_REMOVE, R_QUEUE_SAVE, R_QUEUE_CLEAR, R_HIST_CLEAR, R_SMB_SEARCH, R_SMB_ALBUMS, R_SMB_ARTISTS, R_SMB_GENRES, R_SMB_ALL, R_SMB_PLAYLISTS, R_FTPSETTINGS, R_FTPFIELD, R_USBDRIVE, R_USBEJECT, R_SHADER, R_SEARCHAGAIN, // library views
+	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_SMB, R_HOME_USBLIB, R_HOME_USB, R_HOME_RECENT, R_HOME_MOST, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT, R_HOME_SHADERS, R_HOME_SHORDER, R_HOME_SHSCOPE, R_HOME_SEARCH, R_HOME_ONLINELYR, R_HOME_SETTINGS, R_HOME_SHTOAST, R_HOME_SHFADE, R_HOME_HUDTRACK, R_HOME_HIDENET, R_HOME_RSMODE, R_HOME_LOGPLAYS,
 	R_HOME_EQ, R_EQ_BYPASS, R_EQ_PRESET, R_EQ_BAND0, R_EQ_BAND1, R_EQ_BAND2, R_EQ_BAND3, R_EQ_BAND4, R_EQ_BAND5, R_EQ_BAND6, R_EQ_BAND7, R_EQ_BAND8, R_EQ_BAND9
 };
-enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_SMBHOME, PG_USBLIBS, PG_USBHOME, PG_QUEUE, PG_NETSETTINGS, PG_FTPSETTINGS, PG_USB, PG_SHADERS, PG_SEARCH, PG_SETTINGS, PG_EQUALIZER };
+enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_SMBHOME, PG_USBLIBS, PG_USBHOME, PG_QUEUE, PG_SONGMENU, PG_HISTORY, PG_NETSETTINGS, PG_FTPSETTINGS, PG_USB, PG_SHADERS, PG_SEARCH, PG_SETTINGS, PG_EQUALIZER };
 
 struct Row {
 	RowKind kind;
@@ -969,7 +971,7 @@ View makeHome(int plCount) {
 	v.kind = PG_HOME;
 	v.title = "Library";
 	v.snap = alllib::snapshot();
-	v.builtVersion = library::version() + smblib::version() + usblib::version() + alllib::version();
+	v.builtVersion = library::version() + smblib::version() + usblib::version() + alllib::version() + history::version();
 	v.builtDone = library::scanDone();
 	v.builtScanning = library::scanning();
 	v.plCount = plCount;
@@ -983,6 +985,10 @@ View makeHome(int plCount) {
 	v.rows.push_back({ R_HOME_PLAYLISTS, "Playlists", "", std::to_string(plCount) });
 	v.rows.push_back({ R_HOME_ALL, "All songs", "", std::to_string(s.tracks.size()) });
 	v.rows.push_back({ R_HOME_NETWORK, "Network", "", smbnet::label() });
+	if (history::totalPlays() > 0) {
+		v.rows.push_back({ R_HOME_RECENT, "Recently played", "", plural(history::recent().size(), "song", "songs") });
+		v.rows.push_back({ R_HOME_MOST, "Most played", "", plural(history::totalPlays(), "play", "plays") + " logged" });
+	}
 	if (showNetworkLibrary()) v.rows.push_back({ R_HOME_SMB, "Network library", "", smbSummary() });
 	if (!usblib::drives().empty()) v.rows.push_back({ R_HOME_USBLIB, "USB library", "", usbLibSummary() });
 	v.rows.push_back({ R_HOME_USB, "USB drive", "", usbSummary() });
@@ -1130,6 +1136,82 @@ View makeSmbHome() {
 	return v;
 }
 
+// ---- the song menu: from a song to its album or artist page
+View makeSongMenu(const std::string& path, int queuePos = -1) { // queuePos: its position in the playing queue (adds "play next" and "remove")
+	View v;
+	v.kind = PG_SONGMENU;
+	const trackindex::Hit hit = trackindex::find(path);
+	std::string title = player::baseName(path);
+	v.rows.push_back({ R_BACK, "Back", "", "" });
+	if (hit.snap) {
+		title = library::displayTitle(hit.snap->tracks[hit.track]);
+		const int ai = trackindex::albumGroup(hit), ci = trackindex::artistGroup(hit);
+		if (ai >= 0) v.rows.push_back({ R_SONG_ALBUM, "Go to the album", path, hit.snap->albums[ai].name });
+		if (ci >= 0) v.rows.push_back({ R_SONG_ARTIST, "Go to the artist", path, hit.snap->artists[ci].name });
+	}
+	const bool found = v.rows.size() > 1;
+	if (queuePos >= 0) {
+		v.rows.push_back({ R_SONG_PLAYNEXT, "Play it next", path, "", queuePos });
+		v.rows.push_back({ R_SONG_REMOVE, "Remove it from the queue", path, "", queuePos });
+	}
+	if (!hit.snap) { // not in any scanned library: offer to scan where it lives
+		if (path.compare(0, 6, "smb://") == 0) v.rows.push_back({ R_SONG_SCAN, "Scan the network share into the database", path, "adds new songs, takes a few minutes" });
+		else if (usbdrive::isUsbPath(path) || usbdrive::isStablePath(path)) v.rows.push_back({ R_SONG_SCAN, "Scan its USB drive into the database", path, "only new songs are read" });
+	}
+	if (path.compare(0, 6, "smb://") != 0) { // a file on the SD card or a USB drive: its folder can always be opened in the folder browser
+		std::string real = usbdrive::isStablePath(path) ? usbdrive::resolvePath(path) : path;
+		const size_t s = real.rfind('/');
+		if (!real.empty() && s != std::string::npos) v.rows.push_back({ R_SONG_FOLDER, "Open its folder", path, real.substr(0, s) });
+	}
+	v.title = title;
+	if (found) v.subtitle = "Where do you want to go?";
+	else if (hit.snap) v.subtitle = "It is in the library, but has no album or artist page";
+	else { // say which path was looked for, so a mismatch can be seen
+		const std::string shown = path.size() > 70 ? "..." + path.substr(path.size() - 67) : path;
+		v.subtitle = "Not found in the library: " + shown;
+	}
+	v.sel = v.rows.size() > 1 ? 1 : 0;
+	return v;
+}
+
+// ---- the play history pages
+std::string agoText(int64_t t) {
+	const int64_t d = (int64_t)time(NULL) - t;
+	if (t <= 0) return "";
+	if (d < 90) return "just now";
+	if (d < 3600) return std::to_string(d / 60) + " min ago";
+	if (d < 86400) return std::to_string(d / 3600) + (d / 3600 == 1 ? " hour ago" : " hours ago");
+	if (d < 86400 * 30) return std::to_string(d / 86400) + (d / 86400 == 1 ? " day ago" : " days ago");
+	char buf[24] = "";
+	time_t tt = (time_t)t;
+	struct tm* p = localtime(&tt);
+	if (p) { struct tm tmv = *p; strftime(buf, sizeof(buf), "%Y-%m-%d", &tmv); }
+	return buf;
+}
+
+View makeHistoryView(bool most) {
+	const std::vector<history::Entry> es = most ? history::mostPlayed() : history::recent();
+	std::vector<Item> items;
+	for (const history::Entry& e : es) {
+		Item it;
+		it.path = e.path;
+		it.label = e.title.empty() ? player::baseName(e.path) : e.title;
+		std::string who = e.artist;
+		if (!e.album.empty()) who += (who.empty() ? "" : "  -  ") + e.album;
+		it.sub = who + (who.empty() ? "" : "     ") + plural(e.plays, "play", "plays") + (e.lastPlayed > 0 ? "  -  " + agoText(e.lastPlayed) : std::string());
+		items.push_back(std::move(it));
+	}
+	View v = makeTrackView(PG_HISTORY, most ? "Most played" : "Recently played",
+		plural(items.size(), "song", "songs") + "  -  " + plural(history::totalPlays(), "play", "plays") + " logged",
+		items, "Play all", std::make_shared<library::Snapshot>());
+	v.emptyMsg = "Nothing played yet";
+	if (!items.empty()) {
+		v.rows.insert(v.rows.begin() + 2, Row{ R_HIST_CLEAR, "Clear the play history", "", "", 0 });
+		v.sel = 3;
+	}
+	return v;
+}
+
 // The playing queue: every song in the order it will be played, the one playing now highlighted. A plays the highlighted song.
 View makeQueueView() {
 	View v;
@@ -1151,7 +1233,9 @@ View makeQueueView() {
 
 	v.rows.push_back({ R_BACK, "Back", "", "" });
 	v.rows.push_back({ R_QUEUE_LYRICS, "Lyrics", "", "show or hide" });
-	int nowRow = 2;
+	v.rows.push_back({ R_QUEUE_SAVE, "Save the queue as a playlist", "", "" });
+	v.rows.push_back({ R_QUEUE_CLEAR, "Clear the queue", "", "the song that is playing stays" });
+	int nowRow = 4;
 	for (size_t i = 0; i < order.size(); i++) {
 		std::string key = order[i];
 		if (usbdrive::isUsbPath(key)) { const std::string st = usbdrive::stablePath(key); if (!st.empty()) key = st; } // (the database knows USB songs by drive id)
@@ -1164,7 +1248,7 @@ View makeQueueView() {
 		v.rows.push_back({ isNow ? R_QUEUE_NOW : R_QUEUE_ITEM, std::to_string(i + 1) + ". " + label, order[i], sub, (int)i });
 	}
 	v.subtitle = order.empty() ? std::string("Nothing queued yet")
-		: (now >= 0 ? "Playing " + std::to_string(now + 1) + " of " + std::to_string(order.size()) : std::to_string(order.size()) + " songs") + "  -  " + player::modeName(player::mode());
+		: (now >= 0 ? "Playing " + std::to_string(now + 1) + " of " + std::to_string(order.size()) : std::to_string(order.size()) + " songs") + "  -  " + player::modeName(player::mode()) + "  -  X: song menu";
 	v.sel = std::min(nowRow, (int)v.rows.size() - 1);
 	return v;
 }
@@ -1293,7 +1377,77 @@ void libClose() {
 	if (g_lib.mode == M_PICK) g_lib.mode = g_lib.pickReturn;
 	g_lib.open = false;
 	g_touchOwned = false;
-	if (g_lib.mode == M_MENU && g_lib.stack.size() > 1 && g_lib.stack.back().kind == PG_QUEUE) g_lib.stack.pop_back(); // the queue page is not kept for next time
+	while (g_lib.mode == M_MENU && g_lib.stack.size() > 1 && (g_lib.stack.back().kind == PG_QUEUE || g_lib.stack.back().kind == PG_SONGMENU)) g_lib.stack.pop_back(); // these pages are not kept for next time
+}
+
+// rebuilds the queue page (after songs were removed / moved), keeping the selection where it was
+void refreshQueuePage() {
+	if (!onQueuePage()) return;
+	View& qv = g_lib.stack.back();
+	const int sel = qv.sel;
+	const float sc = qv.scroll;
+	qv = makeQueueView();
+	qv.sel = std::min(sel, (int)qv.rows.size() - 1);
+	qv.scroll = sc;
+	clampScroll(qv);
+	qv.scrollDisp = qv.scroll;
+}
+
+// the song menu was opened on its own (from the player), so B closes the library instead of going back to the main menu
+bool onSongMenuDirect() { return g_lib.open && g_lib.mode == M_MENU && g_lib.stack.size() == 2 && g_lib.stack.back().kind == PG_SONGMENU; }
+
+// opens the library on the song menu of a song (from the track info page)
+void libOpenSongMenu(const std::string& path) {
+	g_lib.open = true;
+	libShowMenu(); // the main menu below, so Back leads somewhere sensible
+	libPush(makeSongMenu(path));
+}
+
+// X on a song of the playing queue opens its song menu
+bool openSongMenuFromRow() {
+	if (!onQueuePage()) return false;
+	View& v = cur();
+	if (v.sel < 0 || v.sel >= (int)v.rows.size()) return false;
+	const Row r = v.rows[v.sel];
+	if (r.kind != R_QUEUE_ITEM && r.kind != R_QUEUE_NOW) return false;
+	libPush(makeSongMenu(r.path, r.ref)); // r.ref = its position in the queue
+	return true;
+}
+
+// opens the song's folder in the folder browser, with the song selected
+void libOpenFolderOf(const std::string& path) {
+	const std::string real = usbdrive::isStablePath(path) ? usbdrive::resolvePath(path) : path;
+	if (real.empty()) { showToast("That USB drive is not connected"); return; }
+	const size_t s = real.rfind('/');
+	if (s == std::string::npos) return;
+	std::string dir = real.substr(0, s);
+	if (!dir.empty() && dir.back() == ':') dir += "/"; // "ums0:" -> "ums0:/"
+	if (g_lib.stack.size() > 1) g_lib.stack.resize(1);
+	g_lib.mode = M_FOLDERS;
+	libEnter(dir, real);
+}
+
+// replaces the song menu by the album / artist page of the song, with the song selected
+void libGoToGroup(const std::string& path, bool album) {
+	const trackindex::Hit hit = trackindex::find(path);
+	const int gi = hit.snap ? (album ? trackindex::albumGroup(hit) : trackindex::artistGroup(hit)) : -1;
+	if (gi < 0) { showToast("That song is not in the library"); return; }
+	const library::Group g = album ? hit.snap->albums[gi] : hit.snap->artists[gi];
+	View nv = album ? makeAlbumView(hit.snap, g) : makeArtistView(hit.snap, g);
+	const std::string want = hit.snap->tracks[hit.track].path;
+	for (size_t i = 0; i < nv.rows.size(); i++) {
+		if (album && nv.rows[i].kind == R_TRACK && nv.rows[i].path == want) { nv.sel = (int)i; break; }
+		if (!album && nv.rows[i].kind == R_ALBUM) { // the album of the artist that has the song
+			const std::vector<int>& tr = nv.groups[nv.rows[i].ref].tracks;
+			if (std::find(tr.begin(), tr.end(), hit.track) != tr.end()) { nv.sel = (int)i; break; }
+		}
+	}
+	if (!g_lib.stack.empty() && g_lib.stack.back().kind == PG_SONGMENU) g_lib.stack.pop_back();
+	libPush(std::move(nv));
+	View& t = cur();
+	t.scroll = fmaxf(0.0f, t.sel * ROW_H - listHeight() * 0.4f);
+	clampScroll(t);
+	t.scrollDisp = t.scroll;
 }
 
 // B closes only at the very top; Left goes back but never closes
@@ -1313,7 +1467,7 @@ void libRefreshHome() {
 	if (g_lib.stack.empty()) return;
 	View& h = g_lib.stack[0];
 	const bool scan = library::scanning();
-	if (!h.dirty && h.builtVersion == library::version() + smblib::version() + usblib::version() + alllib::version() && h.builtScanning == scan && (!scan || h.builtDone == library::scanDone())) return;
+	if (!h.dirty && h.builtVersion == library::version() + smblib::version() + usblib::version() + alllib::version() + history::version() && h.builtScanning == scan && (!scan || h.builtDone == library::scanDone())) return;
 	View nv = makeHome(h.plCount);
 	nv.sel = std::min(std::max(h.sel, 0), (int)nv.rows.size() - 1); // a row may have disappeared (sleep timer option)
 	nv.scroll = h.scroll;
@@ -1432,9 +1586,9 @@ std::string suggestPlaylistName() {
 	return n == "Playlist" ? "Playlist 1" : n;
 }
 
-void saveQueueAsPlaylist() {
+void saveQueueAsPlaylist(bool wholeQueue = false) { // wholeQueue: every song in the queue (the queue page), not only the ones you picked
 	std::vector<std::string> q;
-	for (const std::string& p : player::chosenQueuePaths()) { // not the tracks the player loaded by itself
+	for (const std::string& p : wholeQueue ? player::queuePaths() : player::chosenQueuePaths()) { // not the tracks the player loaded by itself
 		if (usbdrive::isUsbPath(p)) { const std::string st = usbdrive::stablePath(p); if (!st.empty()) q.push_back(st); } // (a USB song is saved by its drive id, not by the slot name)
 		else q.push_back(p);
 	}
@@ -1453,7 +1607,7 @@ void saveQueueAsPlaylist() {
 	const std::string savePath = uniquePlaylistPath(wanted, name);
 	if (library::savePlaylist(savePath, q)) {
 		showToast("Saved playlist: " + name);
-		if (!g_lib.stack.empty()) g_lib.stack.back() = makePlaylistsView(g_lib.stack.back().kind == PG_PLAYLISTS && g_lib.stack.back().network, g_lib.stack.back().kind == PG_PLAYLISTS ? g_lib.stack.back().driveId : std::string()); // show it
+		if (!g_lib.stack.empty() && g_lib.stack.back().kind == PG_PLAYLISTS) g_lib.stack.back() = makePlaylistsView(g_lib.stack.back().network, g_lib.stack.back().driveId); // show it
 		libUpdatePlaylistCount();
 	}
 	else {
@@ -2048,13 +2202,14 @@ View makeSettingsView() {
 	v.rows.push_back({ R_HOME_RESUME, "Resume on launch", "", player::configInt("resume_play", 0) ? "keeps playing" : "starts paused" });
 	v.rows.push_back({ R_HOME_RSMODE, "Right stick left / right", "", player::configInt("rs_queue", 0) ? "playing queue" : "lyrics" });
 	v.rows.push_back({ R_HOME_HIDENET, "Hide network library when Wi-Fi is off", "", player::configInt("hide_net_offline", 0) ? "on" : "off" });
-	v.rows.push_back({ R_HOME_HUDTRACK, "Show player when a new track starts", "", player::configInt("hud_on_track", 1) ? "on" : "off" });
 	v.rows.push_back({ R_HOME_AUTO, "Auto-change visualisation", "", autoLabel() });
 	v.rows.push_back({ R_HOME_SHADERS, "Shaders", "", std::to_string(shaderpick::favouriteCount()) + (shaderpick::favouriteCount() == 1 ? " favourite" : " favourites") });
 	v.rows.push_back({ R_HOME_SHSCOPE, "Shader list", "", shaderpick::scope() == shaderpick::SCOPE_FAVOURITES ? "favourites only" : "all shaders" });
 	v.rows.push_back({ R_HOME_SHORDER, "Shader order", "", shaderpick::order() == shaderpick::ORDER_RANDOM ? "random" : "in order" });
 	v.rows.push_back({ R_HOME_SHTOAST, "Show shader name when it changes", "", player::configInt("shader_toast", 1) ? "on" : "off" });
 	v.rows.push_back({ R_HOME_SHFADE, "Smooth shader changes", "", player::configInt("shader_fade", 1) ? "on" : "off" });
+	v.rows.push_back({ R_HOME_LOGPLAYS, "Remember what I play", "", player::configInt("log_plays", 1) ? "on" : "off" });
+	v.rows.push_back({ R_HOME_HUDTRACK, "Show player when a new track starts", "", player::configInt("hud_on_track", 1) ? "on" : "off" });
 	v.sel = 1;
 	return v;
 }
@@ -2203,6 +2358,65 @@ void libActivate(int idx) {
 	case R_HOME_RSMODE:
 		player::setConfigInt("rs_queue", player::configInt("rs_queue", 0) ? 0 : 1);
 		showToast(player::configInt("rs_queue", 0) ? "Right stick left / right now opens and closes the playing queue (lyrics: the Lyrics row on that page)" : "Right stick left / right shows and hides the lyrics");
+		settingsChanged();
+		break;
+	case R_HOME_RECENT: libPush(makeHistoryView(false)); break;
+	case R_HOME_MOST: libPush(makeHistoryView(true)); break;
+	case R_HIST_CLEAR:
+		if (!v.confirmDelete) { // first press only asks; the second one clears it
+			v.confirmDelete = true;
+			v.rows[idx].label = "Press A again to clear it for good";
+			showToast("Move away to cancel, or press A again to delete the whole play history");
+		}
+		else {
+			history::clearAll();
+			if (g_lib.stack.size() > 1) g_lib.stack.pop_back(); // v is gone after this
+			if (!g_lib.stack.empty()) g_lib.stack[0].dirty = true;
+			showToast("Play history cleared");
+		}
+		break;
+	case R_SONG_PLAYNEXT:
+		if (!g_lib.stack.empty() && g_lib.stack.back().kind == PG_SONGMENU) g_lib.stack.pop_back(); // v is gone after this
+		showToast(player::queuePlayNext(row.ref) ? "It plays next" : "It is playing now");
+		refreshQueuePage();
+		break;
+	case R_SONG_REMOVE:
+		if (!g_lib.stack.empty() && g_lib.stack.back().kind == PG_SONGMENU) g_lib.stack.pop_back();
+		player::queueRemove(row.ref);
+		showToast("Removed from the queue");
+		refreshQueuePage();
+		break;
+	case R_QUEUE_SAVE: saveQueueAsPlaylist(true); break;
+	case R_QUEUE_CLEAR:
+		if (!v.confirmDelete) { // first press only asks; the second one clears the queue
+			v.confirmDelete = true;
+			v.rows[idx].label = "Press A again to clear the queue";
+			showToast("Move away to cancel, or press A again to clear the queue");
+		}
+		else {
+			player::queueClear();
+			showToast("Queue cleared (the song that is playing stays)");
+			refreshQueuePage(); // v is replaced by this
+		}
+		break;
+	case R_SONG_FOLDER: libOpenFolderOf(row.path); break;
+	case R_SONG_SCAN: {
+		if (row.path.compare(0, 6, "smb://") == 0) {
+			if (smbscan::running() || smbscan::start()) showToast("Scanning the share in the background. A message appears when it is done");
+		}
+		else {
+			const std::string real = usbdrive::isStablePath(row.path) ? usbdrive::resolvePath(row.path) : row.path;
+			const size_t colon = real.find(':');
+			if (real.empty() || colon == std::string::npos) showToast("That USB drive is not connected");
+			else if (usbscan::running() || usbscan::start(real.substr(0, colon + 1))) showToast("Scanning the drive in the background. A message appears when it is done");
+		}
+		break;
+	}
+	case R_SONG_ALBUM: libGoToGroup(row.path, true); break;
+	case R_SONG_ARTIST: libGoToGroup(row.path, false); break;
+	case R_HOME_LOGPLAYS:
+		player::setConfigInt("log_plays", player::configInt("log_plays", 1) ? 0 : 1);
+		showToast(player::configInt("log_plays", 1) ? "Plays are logged (Recently played, Most played)" : "Plays are not logged (what is already logged is kept)");
 		settingsChanged();
 		break;
 	case R_HOME_USBLIB: libPush(makeUsbLibsView()); break;
@@ -2613,7 +2827,8 @@ const float INFO_W = 760.0f;
 struct Info {
 	bool open = false;
 	float slide = 0.0f;
-	std::string forPath;       // file the data below belongs to
+	std::string forPath;       // file the data below belongs to (for a network song: its copy in the cache folder)
+	std::string shownPath;     // the path to show for it: for a network song its smb:// address, not the cache copy
 	tags::TrackTags t;
 	int coverW = 0, coverH = 0;
 } g_info;
@@ -2693,6 +2908,8 @@ void infoUploadCover(const std::vector<uint8_t>& encoded) {
 
 void infoLoad() {
 	g_info.forPath = player::currentPath();
+	g_info.shownPath = player::currentSourcePath(); // what the song was queued with
+	if (g_info.shownPath.empty()) g_info.shownPath = g_info.forPath;
 	g_info.t = tags::TrackTags();
 	infoFreeCover();
 	if (g_info.forPath.empty()) return;
@@ -3276,11 +3493,13 @@ Result update(const Input& in) {
 		if (d & BTN_LS_DOWN) libJumpTo((int)cur().rows.size() - 1);
 		{ // a pending "delete playlist" confirmation is cancelled as soon as the selection leaves that row
 			View& cv = cur();
-			if (cv.confirmDelete && (cv.sel < 0 || cv.sel >= (int)cv.rows.size() || (cv.rows[cv.sel].kind != R_DELPLAYLIST && cv.rows[cv.sel].kind != R_USB_FORGET))) {
+			if (cv.confirmDelete && (cv.sel < 0 || cv.sel >= (int)cv.rows.size() || (cv.rows[cv.sel].kind != R_DELPLAYLIST && cv.rows[cv.sel].kind != R_USB_FORGET && cv.rows[cv.sel].kind != R_HIST_CLEAR && cv.rows[cv.sel].kind != R_QUEUE_CLEAR))) {
 				cv.confirmDelete = false;
 				for (Row& r : cv.rows) {
 					if (r.kind == R_DELPLAYLIST) r.label = "Delete this playlist";
 					if (r.kind == R_USB_FORGET) r.label = "Forget this drive";
+					if (r.kind == R_HIST_CLEAR) r.label = "Clear the play history";
+					if (r.kind == R_QUEUE_CLEAR) r.label = "Clear the queue";
 				}
 			}
 		}
@@ -3290,10 +3509,10 @@ Result update(const Input& in) {
 		if (d & BTN_RS_LEFT) { if (onQueuePage()) libClose(); else libJumpLetter(-1); }
 		if (d & BTN_L3) libQueueSelected(false);
 		if (d & BTN_A) libActivate(cur().sel);
-		if (d & BTN_B) { if (onQueuePage()) libClose(); else libBack(true); }
+		if (d & BTN_B) { if (onQueuePage() || onSongMenuDirect()) libClose(); else libBack(true); }
 		if ((d & BTN_LEFT) && !eqConsumedLeftRight) libBack(false);
 		if ((d & BTN_RIGHT) && !eqConsumedLeftRight && cur().sel < (int)cur().rows.size() && rowOpensSomething(cur().rows[cur().sel].kind)) libActivate(cur().sel);
-		if (d & BTN_X) libPlaySelected();
+		if (d & BTN_X) { if (!openSongMenuFromRow()) libPlaySelected(); }
 		if (d & BTN_Y) libClose();
 		if (d & BTN_L) libShowMenu();
 		if (d & BTN_R) libJumpMusicFolder();
@@ -3302,7 +3521,7 @@ Result update(const Input& in) {
 		if (d & BTN_R3) libAddToPlaylistPicker();
 	}
 	else {
-		res.consumedButtons = BTN_A | BTN_ZL | BTN_ZR | BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT | BTN_Y | BTN_R3 | BTN_L3 | (g_info.open ? BTN_B : 0u);
+		res.consumedButtons = BTN_A | BTN_ZL | BTN_ZR | BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT | BTN_Y | BTN_R3 | BTN_L3 | (g_info.open ? (BTN_B | BTN_X) : 0u);
 		if (d & BTN_A) doAction(T_PLAY);
 		if (d & BTN_ZL) player::prev();
 		if (d & BTN_ZR) player::next();
@@ -3327,6 +3546,7 @@ Result update(const Input& in) {
 		if (d & BTN_R3) doAction(T_MODE);
 		if (d & BTN_L3) toggleInfo();
 		if ((d & BTN_B) && g_info.open) closeInfo();
+		if ((d & BTN_X) && g_info.open && player::hasTracks()) { const std::string p = player::currentSourcePath(); closeInfo(); libOpenSongMenu(p); } // go to the album / artist (a network song by its smb:// path)
 		if (d & BTN_Y) { closeInfo(); libOpenNow(); }
 	}
 
@@ -3641,6 +3861,17 @@ void drawLibrary() {
 		case R_HOME_ALL: case R_SMB_ALL: case R_USB_ALL: ic = IC_NOTE; iconCol = C_ACCENT; break;
 		case R_HOME_AUTO: ic = IC_VIZ; iconCol = g_autoSecs ? C_ACCENT : C_DIM; break;
 		case R_HOME_SEARCH: case R_SMB_SEARCH: case R_USB_SEARCH: ic = IC_NOTE; iconCol = C_ACCENT; break;
+		case R_SONG_PLAYNEXT: ic = IC_PLAY; iconCol = C_ACCENT; break;
+		case R_SONG_REMOVE: case R_QUEUE_CLEAR: { const Color red = { 1.0f, 0.45f, 0.45f, 1.0f }; ic = IC_CLOSE; iconCol = red; textCol = red; break; }
+		case R_QUEUE_SAVE: ic = IC_PLAYLIST; iconCol = textCol = C_ACCENT; break;
+		case R_SONG_SCAN: ic = IC_VIZ; iconCol = C_ACCENT; break;
+		case R_SONG_FOLDER: ic = IC_FOLDER; iconCol = C_ACCENT; break;
+		case R_SONG_ALBUM: ic = IC_ALBUM; iconCol = C_ACCENT; break;
+		case R_SONG_ARTIST: ic = IC_ARTIST; iconCol = C_ACCENT; break;
+		case R_HIST_CLEAR: { const Color red = { 1.0f, 0.45f, 0.45f, 1.0f }; ic = IC_CLOSE; iconCol = red; textCol = red; break; }
+		case R_HOME_RECENT: ic = IC_NOTE; iconCol = C_ACCENT; break;
+		case R_HOME_MOST: ic = IC_STAR; iconCol = C_ACCENT; break;
+		case R_HOME_LOGPLAYS: ic = IC_VIZ; iconCol = player::configInt("log_plays", 1) ? C_ACCENT : C_DIM; break;
 		case R_QUEUE_NOW: ic = IC_PLAY; iconCol = textCol = C_ACCENT; break;
 		case R_QUEUE_ITEM: ic = IC_NOTE; iconCol = textCol = C_WHITE; break;
 		case R_QUEUE_LYRICS: ic = IC_NOTE; iconCol = C_ACCENT; break;
@@ -3825,8 +4056,9 @@ void drawInfo() {
 
 	// header
 	drawText(SZ_TITLE, px + 36, 6, "Track info", C_WHITE);
-	drawText(SZ_SMALL, px + 38, 60, player::baseName(g_info.forPath), C_DIM, INFO_W - 160);
+	drawText(SZ_SMALL, px + 38, 60, player::baseName(g_info.shownPath), C_DIM, INFO_W - 160);
 	const bool closeP = g_touching && g_touchOwned && g_info.open && g_touchTarget == T_CLOSE;
+	drawText(SZ_SMALL, px + INFO_W - 92, 24, "X   Go to album / artist", C_ACCENT, 0, RIGHT);
 	circle(px + INFO_W - 44, 50, 26, withA(C_WHITE, closeP ? 0.28f : 0.10f));
 	drawIcon(IC_CLOSE, px + INFO_W - 44, 50, 26, C_WHITE);
 	rrect(px + 16, 99, INFO_W - 32, 1, 0, withA(C_WHITE, 0.12f));
@@ -3907,7 +4139,7 @@ void drawInfo() {
 		drawText(SZ_SMALL, colR + labelW, y, right[i].v, C_WHITE, 330 - labelW);
 	}
 	drawText(SZ_SMALL, colL, 636, "Path", C_DIM);
-	drawText(SZ_SMALL, colL + 62, 636, g_info.forPath, C_WHITE, INFO_W - 36 - 62 - 30, LEFT, true);
+	drawText(SZ_SMALL, colL + 62, 636, g_info.shownPath, C_WHITE, INFO_W - 36 - 62 - 30, LEFT, true);
 
 	// footer
 	const Color bar = { 0.015f, 0.025f, 0.05f, 0.97f };

@@ -25,6 +25,12 @@ bool post(std::function<void(sqlite3*)> job);   // runs later, on the database t
 // (The job may write into variables of the caller: it is always finished when call() returns true.)
 bool call(std::function<void(sqlite3*)> job);
 
+// The play history lives in a second file, history.db, in the same folder. It is opened by the same thread (SQLite is built
+// single-threaded) but is never deleted or rebuilt: a file this version cannot read is moved aside (history.db.bad) and a file
+// made by a newer version is left alone (the history is then simply not available).
+bool postHistory(std::function<void(sqlite3*)> job);   // runs later on the database thread, with the history database. false = no history database
+bool historyReady();
+
 // helpers for jobs
 bool exec(sqlite3* db, const char* sql);        // false (and a line in the log) on error
 
