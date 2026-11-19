@@ -701,7 +701,7 @@ const float EQ_TRACK_X0 = 190.0f, EQ_TRACK_X1 = 560.0f, EQ_VALUE_X = 575.0f; // 
 enum RowKind {
 	R_UP, R_PLAYDIR, R_SETDIR, R_DIR, R_FILE,                                   // folder browser
 	R_BACK, R_PLAYALL, R_TRACK, R_ALBUM, R_ARTIST, R_GENRE, R_PLAYLIST, R_SAVEQUEUE, R_DELPLAYLIST, R_NEWPLAYLIST, R_PICKPLAYLIST, R_RENAMEPLAYLIST, R_NETDIR, R_NETSETTINGS, R_NETFIELD, R_NETCONNECT, R_NETKEEP, R_NETSCAN, R_USBSCAN, R_USBLIB_DRIVE, R_USB_SEARCH, R_USB_ALBUMS, R_USB_ARTISTS, R_USB_GENRES, R_USB_ALL, R_USB_PLAYLISTS, R_USB_FORGET, R_QUEUE_ITEM, R_QUEUE_NOW, R_QUEUE_LYRICS, R_SONG_ALBUM, R_SONG_ARTIST, R_SONG_FOLDER, R_SONG_SCAN, R_SONG_PLAYNEXT, R_SONG_REMOVE, R_QUEUE_SAVE, R_QUEUE_CLEAR, R_HIST_CLEAR, R_SMB_SEARCH, R_SMB_ALBUMS, R_SMB_ARTISTS, R_SMB_GENRES, R_SMB_ALL, R_SMB_PLAYLISTS, R_FTPSETTINGS, R_FTPFIELD, R_USBDRIVE, R_USBEJECT, R_SHADER, R_SEARCHAGAIN, // library views
-	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_SMB, R_HOME_USBLIB, R_HOME_USB, R_HOME_RECENT, R_HOME_MOST, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT, R_HOME_SHADERS, R_HOME_SHORDER, R_HOME_SHSCOPE, R_HOME_SEARCH, R_HOME_ONLINELYR, R_HOME_SETTINGS, R_HOME_SHTOAST, R_HOME_SHFADE, R_HOME_HUDTRACK, R_HOME_HIDENET, R_HOME_RSMODE, R_HOME_LOGPLAYS,
+	R_HOME_FOLDERS, R_HOME_ALBUMS, R_HOME_ARTISTS, R_HOME_GENRES, R_HOME_PLAYLISTS, R_HOME_NETWORK, R_HOME_SMB, R_HOME_USBLIB, R_HOME_USB, R_HOME_RECENT, R_HOME_MOST, R_HOME_ALL, R_HOME_AUTO, R_HOME_RESCAN, R_HOME_RESUME, R_HOME_SLEEP, R_HOME_SLEEPACT, R_HOME_SHADERS, R_HOME_SHORDER, R_HOME_SHSCOPE, R_HOME_SEARCH, R_HOME_ONLINELYR, R_HOME_SETTINGS, R_HOME_SHTOAST, R_HOME_SHFADE, R_HOME_HUDTRACK, R_HOME_HIDENET, R_HOME_RSMODE, R_HOME_LOGPLAYS, R_HOME_DOCKRES, R_HOME_IDLE, R_HOME_IDLEBL,
 	R_HOME_EQ, R_EQ_BYPASS, R_EQ_PRESET, R_EQ_BAND0, R_EQ_BAND1, R_EQ_BAND2, R_EQ_BAND3, R_EQ_BAND4, R_EQ_BAND5, R_EQ_BAND6, R_EQ_BAND7, R_EQ_BAND8, R_EQ_BAND9
 };
 enum PageKind { PG_FOLDERS, PG_HOME, PG_ALBUMS, PG_ARTISTS, PG_GENRES, PG_PLAYLISTS, PG_ALL, PG_ALBUM, PG_ARTIST, PG_GENRE, PG_PLAYLIST, PG_PICKLIST, PG_NETWORK, PG_SMBHOME, PG_USBLIBS, PG_USBHOME, PG_QUEUE, PG_SONGMENU, PG_HISTORY, PG_NETSETTINGS, PG_FTPSETTINGS, PG_USB, PG_SHADERS, PG_SEARCH, PG_SETTINGS, PG_EQUALIZER };
@@ -2187,6 +2187,14 @@ void libRenamePlaylist() {
 }
 
 // ---- Settings page: the switches that used to crowd the main menu
+// "Screen off when idle": the choices (seconds, 0 = never)
+const int IDLE_CHOICES[] = { 0, 30, 60, 120, 300, 600, 1800 };
+std::string idleText(int secs) {
+	if (secs <= 0) return "off";
+	if (secs < 60) return std::to_string(secs) + " seconds";
+	return std::to_string(secs / 60) + (secs == 60 ? " minute" : " minutes");
+}
+
 View makeSettingsView() {
 	View v;
 	v.kind = PG_SETTINGS;
@@ -2208,6 +2216,9 @@ View makeSettingsView() {
 	v.rows.push_back({ R_HOME_SHORDER, "Shader order", "", shaderpick::order() == shaderpick::ORDER_RANDOM ? "random" : "in order" });
 	v.rows.push_back({ R_HOME_SHTOAST, "Show shader name when it changes", "", player::configInt("shader_toast", 1) ? "on" : "off" });
 	v.rows.push_back({ R_HOME_SHFADE, "Smooth shader changes", "", player::configInt("shader_fade", 1) ? "on" : "off" });
+	v.rows.push_back({ R_HOME_IDLE, "Screen off when idle", "", idleText(player::configInt("idle_secs", 0)) });
+	v.rows.push_back({ R_HOME_IDLEBL, "Backlight off too (handheld)", "", player::configInt("idle_backlight", 0) ? "on" : "off" });
+	v.rows.push_back({ R_HOME_DOCKRES, "Resolution when docked", "", player::configInt("docked_1080", 1) ? "1080p" : "720p" });
 	v.rows.push_back({ R_HOME_LOGPLAYS, "Remember what I play", "", player::configInt("log_plays", 1) ? "on" : "off" });
 	v.rows.push_back({ R_HOME_HUDTRACK, "Show player when a new track starts", "", player::configInt("hud_on_track", 1) ? "on" : "off" });
 	v.sel = 1;
@@ -2414,6 +2425,25 @@ void libActivate(int idx) {
 	}
 	case R_SONG_ALBUM: libGoToGroup(row.path, true); break;
 	case R_SONG_ARTIST: libGoToGroup(row.path, false); break;
+	case R_HOME_IDLE: {
+		const int cur = player::configInt("idle_secs", 0);
+		int next = IDLE_CHOICES[0];
+		for (size_t i = 0; i < sizeof(IDLE_CHOICES) / sizeof(IDLE_CHOICES[0]); i++) if (IDLE_CHOICES[i] == cur) { next = IDLE_CHOICES[(i + 1) % (sizeof(IDLE_CHOICES) / sizeof(IDLE_CHOICES[0]))]; break; }
+		player::setConfigInt("idle_secs", next);
+		showToast(next > 0 ? "The screen goes black after " + idleText(next) + " without a button or touch. Any button or touch brings it back" : "The screen stays on");
+		settingsChanged();
+		break;
+	}
+	case R_HOME_IDLEBL:
+		player::setConfigInt("idle_backlight", player::configInt("idle_backlight", 0) ? 0 : 1);
+		showToast(player::configInt("idle_backlight", 0) ? "Handheld: the backlight goes off with the black screen (saves the most battery)" : "The screen only goes black (the backlight stays on)");
+		settingsChanged();
+		break;
+	case R_HOME_DOCKRES:
+		player::setConfigInt("docked_1080", player::configInt("docked_1080", 1) ? 0 : 1);
+		showToast(player::configInt("docked_1080", 1) ? "Docked: shaders are drawn at 1080p (when the app was started docked). Shaders in a \"lowres\" folder at half of that" : "Docked: shaders are drawn at 720p. Shaders in a \"lowres\" folder at half of that");
+		settingsChanged();
+		break;
 	case R_HOME_LOGPLAYS:
 		player::setConfigInt("log_plays", player::configInt("log_plays", 1) ? 0 : 1);
 		showToast(player::configInt("log_plays", 1) ? "Plays are logged (Recently played, Most played)" : "Plays are not logged (what is already logged is kept)");
@@ -3871,6 +3901,9 @@ void drawLibrary() {
 		case R_HIST_CLEAR: { const Color red = { 1.0f, 0.45f, 0.45f, 1.0f }; ic = IC_CLOSE; iconCol = red; textCol = red; break; }
 		case R_HOME_RECENT: ic = IC_NOTE; iconCol = C_ACCENT; break;
 		case R_HOME_MOST: ic = IC_STAR; iconCol = C_ACCENT; break;
+		case R_HOME_IDLE: ic = IC_VIZ; iconCol = player::configInt("idle_secs", 0) > 0 ? C_ACCENT : C_DIM; break;
+		case R_HOME_IDLEBL: ic = IC_VIZ; iconCol = player::configInt("idle_backlight", 0) ? C_ACCENT : C_DIM; break;
+		case R_HOME_DOCKRES: ic = IC_VIZ; iconCol = player::configInt("docked_1080", 1) ? C_ACCENT : C_DIM; break;
 		case R_HOME_LOGPLAYS: ic = IC_VIZ; iconCol = player::configInt("log_plays", 1) ? C_ACCENT : C_DIM; break;
 		case R_QUEUE_NOW: ic = IC_PLAY; iconCol = textCol = C_ACCENT; break;
 		case R_QUEUE_ITEM: ic = IC_NOTE; iconCol = textCol = C_WHITE; break;

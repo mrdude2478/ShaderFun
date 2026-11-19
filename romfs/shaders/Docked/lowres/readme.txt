@@ -1,0 +1,1 @@
+Force heavy duty cpu shaders to run at low res.

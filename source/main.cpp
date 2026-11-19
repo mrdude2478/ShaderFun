@@ -371,7 +371,23 @@ static void applyChannelDirectives(const std::string& fragSource, const std::str
 }
 
 // === Shader state ===
+// Shaders in a folder called "lowres" (anywhere in the path) are drawn at half the width and height of the normal size, and
+// stretched to the screen: a quarter of the pixels to work out, for shaders that are too heavy for a steady frame rate.
+static bool isLowResShader(const std::string& path) {
+	const size_t fileStart = path.find_last_of('/');
+	if (fileStart == std::string::npos) return false;
+	size_t pos = 0;
+	while (pos < fileStart) { // every folder component, not the file name
+		size_t slash = path.find('/', pos);
+		if (slash == std::string::npos || slash > fileStart) break;
+		if (toLower(path.substr(pos, slash - pos)).compare(0, 6, "lowres") == 0) return true;
+		pos = slash + 1;
+	}
+	return false;
+}
+
 struct ShaderProgram {
+	bool lowres = false;     // drawn at half size (see isLowResShader)
 	GLuint prog = 0;
 	GLint iResolutionLoc = -1;
 	GLint iTimeLoc = -1;
@@ -420,6 +436,7 @@ ShaderProgram loadShaderProgram(const char* fragSrc, const std::string& label = 
 	}
 
 	sp.prog = prog;
+	sp.lowres = isLowResShader(label);
 	sp.iResolutionLoc = glGetUniformLocation(prog, "iResolution");
 	sp.iTimeLoc = glGetUniformLocation(prog, "iTime");
 	sp.iTimeDeltaLoc = glGetUniformLocation(prog, "iTimeDelta");
@@ -839,6 +856,29 @@ bool print_ip_local() {
 // Heavy shaders go in a folder whose name starts with "Docked" (e.g. Docked, Docked-intensive).
 // They are only listed while the console is docked: the GPU runs much slower in handheld mode.
 static bool g_docked = false;               // true in TV mode
+
+// === Screen off when idle (Settings: "Screen off when idle") ===
+// After a while without any button, stick or touch the picture goes black and the shaders stop being drawn (the music carries
+// on). Any button or touch brings it back; that press itself is not used for anything else. Handheld, the backlight can be
+// switched off too (Settings), which is what really saves the battery.
+static bool g_screenBlank = false;       // black picture, nothing is drawn
+static bool g_inputSwallow = false;      // the press or touch that woke the screen is ignored until everything is released again
+static bool g_lblReady = false;          // the backlight service could be started
+static bool g_backlightOff = false;
+static uint32_t g_lastInputTick = 0;
+
+static void setBacklight(bool on) {
+	if (!g_lblReady) return;
+	if (on) lblSwitchBacklightOn(0); else lblSwitchBacklightOff(0);
+	g_backlightOff = !on;
+}
+
+// the backlight follows the black picture (handheld, if wanted), and always comes back when the app is not in front
+static void updateBacklight() {
+	const bool want = g_screenBlank && !g_docked && player::configInt("idle_backlight", 0) != 0 && appletGetFocusState() == AppletFocusState_InFocus;
+	if (want != g_backlightOff) setBacklight(!want);
+}
+
 static bool g_forceShaderScan = true;       // rescan the shader list on the next frame
 static bool g_modeToastPending = false;
 
@@ -883,7 +923,7 @@ static bool updateOperationMode() {
 
 // "Shader: name", with a star in front when it is one of your favourites
 static std::string shaderToastText(const std::string& path) {
-	return std::string("Shader: ") + (shaderpick::isFavourite(path) ? "\xE2\x98\x85 " : "") + player::baseName(path);
+	return std::string("Shader: ") + (shaderpick::isFavourite(path) ? "\xE2\x98\x85 " : "") + player::baseName(path) + (isLowResShader(path) ? "  (low res)" : "");
 }
 
 // shows the shader name, unless that is switched off in the Settings page
@@ -963,8 +1003,39 @@ void main() {
 }
 )";
 
-// Two 1280x720 off-screen images and the blend shader, made the first time they are needed.
-// false = not possible on this system: shaders then simply change without preparing or fading.
+// === Resolution ===
+// g_screen = the real size of the picture (the window): 1920x1080 when the app was started docked, otherwise 1280x720.
+// g_base   = the size shaders are drawn at: 1920x1080 when docked (Settings: "Resolution when docked") if the screen is that big,
+//            otherwise 1280x720. A shader from a "lowres" folder is drawn at half of that. The menus, scroller and models always
+//            draw on the full screen, whatever the size of the shader image.
+static int g_screenW = 1280, g_screenH = 720;
+static int g_baseW = 1280, g_baseH = 720;
+static GLuint g_lowFbo = 0, g_lowTex = 0;    // where a "lowres" shader is drawn (half of the base size)
+static GLuint g_baseFbo = 0, g_baseTex = 0;  // where a normal shader is drawn when its size is not the size of the target
+static int g_fadeW = 0, g_fadeH = 0;         // the size the off-screen images were made at
+
+static void setTextureSize(GLuint tex, int w, int h) {
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+}
+
+// a texture + framebuffer to draw into, at this size
+static bool makeRenderTarget(GLuint& tex, GLuint& fbo, int w, int h) {
+	glGenTextures(1, &tex);
+	glGenFramebuffers(1, &fbo);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+	return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+}
+
+// The off-screen images (fade, half size, base size) and the blend shader, made the first time they are needed.
+// false = not possible on this system: shaders then are drawn straight to the screen (no fade, no "lowres").
 static bool ensureFadeResources() {
 	if (g_fadeResReady) return true;
 	if (g_fadeResFailed) return false;
@@ -986,52 +1057,71 @@ static bool ensureFadeResources() {
 	}
 	if (vs) glDeleteShader(vs);
 	if (fs) glDeleteShader(fs);
-	if (!prog) { printf("Fade: blend shader failed (%s), shaders will change without a fade\n", err.c_str()); return false; }
+	if (!prog) { printf("Fade: blend shader failed (%s), shaders are drawn straight to the screen\n", err.c_str()); return false; }
 
 	bool good = true;
-	glGenTextures(2, g_fadeTex);
-	glGenFramebuffers(2, g_fadeFbo);
-	for (int i = 0; i < 2 && good; i++) {
-		glBindTexture(GL_TEXTURE_2D, g_fadeTex[i]);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1280, 720, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glBindFramebuffer(GL_FRAMEBUFFER, g_fadeFbo[i]);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_fadeTex[i], 0);
-		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) good = false;
-	}
+	for (int i = 0; i < 2 && good; i++) good = makeRenderTarget(g_fadeTex[i], g_fadeFbo[i], g_baseW, g_baseH);
+	if (good) good = makeRenderTarget(g_lowTex, g_lowFbo, (g_baseW + 1) / 2, (g_baseH + 1) / 2);
+	if (good) good = makeRenderTarget(g_baseTex, g_baseFbo, g_baseW, g_baseH);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	if (!good) {
-		printf("Fade: off-screen buffers are not available, shaders will change without a fade\n");
+		printf("Fade: off-screen buffers are not available, shaders are drawn straight to the screen\n");
 		glDeleteProgram(prog);
-		glDeleteFramebuffers(2, g_fadeFbo);
-		glDeleteTextures(2, g_fadeTex);
+		glDeleteFramebuffers(2, g_fadeFbo); glDeleteTextures(2, g_fadeTex);
+		if (g_lowFbo) glDeleteFramebuffers(1, &g_lowFbo);
+		if (g_lowTex) glDeleteTextures(1, &g_lowTex);
+		if (g_baseFbo) glDeleteFramebuffers(1, &g_baseFbo);
+		if (g_baseTex) glDeleteTextures(1, &g_baseTex);
+		g_lowFbo = g_lowTex = g_baseFbo = g_baseTex = 0;
 		return false;
 	}
+	g_fadeW = g_baseW;
+	g_fadeH = g_baseH;
 	g_blendProg = prog;
 	g_blendLocA = glGetUniformLocation(prog, "uA");
 	g_blendLocB = glGetUniformLocation(prog, "uB");
 	g_blendLocMix = glGetUniformLocation(prog, "uMix");
 	g_fadeResReady = true;
 	g_fadeResFailed = false;
-	printf("Fade: ready\n");
+	printf("Fade: ready (off-screen images %dx%d and %dx%d)\n", g_baseW, g_baseH, (g_baseW + 1) / 2, (g_baseH + 1) / 2);
 	return true;
 }
 
+// Decides the base size (see above) and resizes the off-screen images when it changed. Cheap: called every frame.
+static void updateRenderSizes() {
+	int bw = 1280, bh = 720;
+	if (g_screenW < 1280 || g_screenH < 720) { bw = g_screenW; bh = g_screenH; }
+	else if (g_docked && player::configInt("docked_1080", 1) != 0 && g_screenW >= 1920 && g_screenH >= 1080) { bw = 1920; bh = 1080; }
+	if (bw != g_baseW || bh != g_baseH) {
+		g_baseW = bw;
+		g_baseH = bh;
+		printf("Shaders are now drawn at %dx%d (screen %dx%d)\n", g_baseW, g_baseH, g_screenW, g_screenH);
+	}
+	if (g_fadeResReady && (g_fadeW != g_baseW || g_fadeH != g_baseH)) { // the images follow
+		for (int i = 0; i < 2; i++) setTextureSize(g_fadeTex[i], g_baseW, g_baseH);
+		setTextureSize(g_lowTex, (g_baseW + 1) / 2, (g_baseH + 1) / 2);
+		setTextureSize(g_baseTex, g_baseW, g_baseH);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		g_fadeW = g_baseW;
+		g_fadeH = g_baseH;
+	}
+}
+
 // Draws one shader over the whole bound framebuffer (the normal frame, or one of the fade buffers).
-static void drawShaderPass(const ShaderProgram& sp, const ImageTex* imgs, float time, float dt, int frame, const float* mouse, GLuint vbo) {
+static void drawShaderPass(const ShaderProgram& sp, const ImageTex* imgs, float time, float dt, int frame, const float* mouse, GLuint vbo, int rw, int rh) {
 	glUseProgram(sp.prog);
-	glUniform3f(sp.iResolutionLoc, 1280.0f, 720.0f, 1.0f);
+	glUniform3f(sp.iResolutionLoc, (float)rw, (float)rh, 1.0f);
 	glUniform1f(sp.iTimeLoc, time);
 
 	// Optional Shadertoy uniforms (only set if the shader declares them)
 	if (sp.iTimeDeltaLoc != -1) glUniform1f(sp.iTimeDeltaLoc, dt);
 	// NOTE: declare as "uniform int iFrame;" in the shader
 	if (sp.iFrameLoc != -1) glUniform1i(sp.iFrameLoc, frame);
-	if (sp.iMouseLoc != -1) glUniform4f(sp.iMouseLoc, mouse[0], mouse[1], mouse[2], mouse[3]);
+	if (sp.iMouseLoc != -1) { // the touch position is in 1280x720 units: scaled to the size this shader is drawn at
+		const float sx = rw / 1280.0f, sy = rh / 720.0f;
+		glUniform4f(sp.iMouseLoc, mouse[0] * sx, mouse[1] * sy, mouse[2] * sx, mouse[3] * sy);
+	}
 	if (sp.iChannelResolutionLoc != -1) {
 		float res[12] = {
 			(float)FFT_SIZE, 1.0f, 1.0f,
@@ -1060,6 +1150,50 @@ static void drawShaderPass(const ShaderProgram& sp, const ImageTex* imgs, float 
 	glEnableVertexAttribArray(0);
 
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+// Copies a texture over the whole bound framebuffer (stretching it if the sizes differ)
+static void blitTexture(GLuint tex, GLuint vbo) {
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glUseProgram(g_blendProg);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glUniform1i(g_blendLocA, 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glUniform1i(g_blendLocB, 1);
+	glUniform1f(g_blendLocMix, 0.0f);
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+	glEnableVertexAttribArray(0);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// Draws a shader into the framebuffer "targetFbo" (0 = the screen) of size tw x th, at the size that fits the shader:
+// the base size, or half of it for a "lowres" shader. When that is not the size of the target, the shader is drawn into
+// an off-screen image of its own size first and that is stretched over the target.
+static void drawShaderTo(GLuint targetFbo, int tw, int th, const ShaderProgram& sp, const ImageTex* imgs, float time, float dt, int frame, const float* mouse, GLuint vbo) {
+	const int rw = sp.lowres ? (g_baseW + 1) / 2 : g_baseW;
+	const int rh = sp.lowres ? (g_baseH + 1) / 2 : g_baseH;
+	const bool sameSize = (rw == tw && rh == th);
+	if (sameSize || !ensureFadeResources()) { // straight into the target (without off-screen images: at the target's own size)
+		const int w = sameSize ? rw : tw, h = sameSize ? rh : th;
+		glBindFramebuffer(GL_FRAMEBUFFER, targetFbo);
+		glViewport(0, 0, w, h);
+		drawShaderPass(sp, imgs, time, dt, frame, mouse, vbo, w, h);
+	}
+	else {
+		glBindFramebuffer(GL_FRAMEBUFFER, sp.lowres ? g_lowFbo : g_baseFbo);
+		glViewport(0, 0, rw, rh);
+		drawShaderPass(sp, imgs, time, dt, frame, mouse, vbo, rw, rh);
+		glBindFramebuffer(GL_FRAMEBUFFER, targetFbo);
+		glViewport(0, 0, tw, th);
+		blitTexture(sp.lowres ? g_lowTex : g_baseTex, vbo);
+	}
+	glViewport(0, 0, g_screenW, g_screenH); // the rest of the frame (scroller, menus, models) is drawn at the full size
 }
 
 // The images a shader asks for with //!iChannel2 / //!iChannel3 (or the X-button image), loaded into fresh textures
@@ -1136,8 +1270,7 @@ static bool prepStep(Prep& p, const std::vector<std::string>& files, int wantInd
 		return true;
 	case Prep::COMPILED:
 		// one hidden frame, so the driver finishes its work for this shader now and not when it is shown
-		glBindFramebuffer(GL_FRAMEBUFFER, g_fadeFbo[1]);
-		drawShaderPass(p.prog, p.img, time, 0.016f, frame, mouse, vbo);
+		drawShaderTo(g_fadeFbo[1], g_fadeW, g_fadeH, p.prog, p.img, time, 0.016f, frame, mouse, vbo);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glFinish();
 		p.stage = Prep::READY;
@@ -1215,10 +1348,8 @@ static void fadeFinish() {
 
 // One frame of the cross-fade: old shader and new shader each into their own image, then blend them onto the screen.
 static void drawFadeFrame(float p, const ShaderProgram& live, float time, float dt, int frame, const float* mouse, GLuint vbo) {
-	glBindFramebuffer(GL_FRAMEBUFFER, g_fadeFbo[0]);
-	drawShaderPass(g_fade.oldProg, g_fade.oldImg, time, dt, frame, mouse, vbo);
-	glBindFramebuffer(GL_FRAMEBUFFER, g_fadeFbo[1]);
-	drawShaderPass(live, g_img, time, dt, frame, mouse, vbo);
+	drawShaderTo(g_fadeFbo[0], g_fadeW, g_fadeH, g_fade.oldProg, g_fade.oldImg, time, dt, frame, mouse, vbo);
+	drawShaderTo(g_fadeFbo[1], g_fadeW, g_fadeH, live, g_img, time, dt, frame, mouse, vbo);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	const float s = p * p * (3.0f - 2.0f * p); // smoothstep
@@ -1333,6 +1464,7 @@ int main(int argc, char* argv[]) {
 	hidInitializeTouchScreen();
 	hidsysInitialize();
 	g_nifmReady = R_SUCCEEDED(nifmInitialize(NifmServiceType_User));
+	g_lblReady = R_SUCCEEDED(lblInitialize()); // (only used for "backlight off" when the screen is idle)
 
 	bool network_available = false;
 
@@ -1377,9 +1509,16 @@ int main(int argc, char* argv[]) {
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24); // needed for 3D models
 
+	// Docked the picture is 1920x1080, handheld 1280x720: the window gets the size of the mode the app is started in
+	const bool dockedAtStart = (appletGetOperationMode() == AppletOperationMode_Console);
 	SDL_Window* window = SDL_CreateWindow("Shaderfun Switch - Audio Reactive",
 		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-		1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+		dockedAtStart ? 1920 : 1280, dockedAtStart ? 1080 : 720, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+	if (!window && dockedAtStart) { // (the usual size, if that was not possible)
+		window = SDL_CreateWindow("Shaderfun Switch - Audio Reactive",
+			SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+			1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+	}
 
 	if (!window) {
 		printf("Failed to create window: %s\n", SDL_GetError());
@@ -1405,7 +1544,14 @@ int main(int argc, char* argv[]) {
 	printf("OpenGL version: %s\n", glGetString(GL_VERSION));
 
 	// Critical OpenGL setup
-	glViewport(0, 0, 1280, 720);
+	{ // the real size of the picture (the system may not give the size that was asked for)
+		int w = 0, h = 0;
+		SDL_GL_GetDrawableSize(window, &w, &h);
+		if (w <= 0 || h <= 0) SDL_GetWindowSize(window, &w, &h);
+		if (w > 0 && h > 0) { g_screenW = w; g_screenH = h; }
+		printf("Screen: %dx%d\n", g_screenW, g_screenH);
+	}
+	glViewport(0, 0, g_screenW, g_screenH);
 
 	// Test OpenGL rendering with a simple color
 	glClearColor(1.0f, 0.0f, 0.0f, 1.0f); // Red
@@ -1556,6 +1702,18 @@ int main(int argc, char* argv[]) {
 			g_modeToastPending = true;
 		}
 
+		{ // the picture can change size (docking): follow it, and decide what size the shaders are drawn at
+			int w = 0, h = 0;
+			SDL_GL_GetDrawableSize(window, &w, &h);
+			if (w > 0 && h > 0 && (w != g_screenW || h != g_screenH)) {
+				g_screenW = w;
+				g_screenH = h;
+				glViewport(0, 0, w, h);
+				printf("Screen is now %dx%d\n", w, h);
+			}
+			updateRenderSizes();
+		}
+
 		frameCount++;
 
 		smbscan::poll(); // shows a message when the SMB scan has finished
@@ -1582,6 +1740,33 @@ int main(int argc, char* argv[]) {
 		padUpdate(&pad);
 		u64 kDown = padGetButtonsDown(&pad);
 
+		// Idle screen: any input resets the timer; after the set time the picture goes black until the next press or touch
+		bool inputBlocked = false;
+		{
+			const u64 heldNow = padGetButtons(&pad);
+			HidTouchScreenState touchProbe = {};
+			hidGetTouchScreenStates(&touchProbe, 1);
+			const HidAnalogStickState stL = padGetStickPos(&pad, 0), stR = padGetStickPos(&pad, 1);
+			const bool stickMoved = abs(stL.x) > 12000 || abs(stL.y) > 12000 || abs(stR.x) > 12000 || abs(stR.y) > 12000;
+			const bool anyInput = heldNow != 0 || touchProbe.count > 0 || stickMoved;
+			const uint32_t nowT = SDL_GetTicks();
+			if (anyInput) g_lastInputTick = nowT;
+			const int idleSecs = player::configInt("idle_secs", 0);
+			if (!g_screenBlank && idleSecs > 0 && nowT - g_lastInputTick >= (uint32_t)idleSecs * 1000u) {
+				g_screenBlank = true;
+				printf("Screen: idle for %d s, black\n", idleSecs);
+			}
+			else if (g_screenBlank && (anyInput || idleSecs <= 0)) {
+				g_screenBlank = false;
+				g_inputSwallow = anyInput; // that press only wakes the screen
+				printf("Screen: back on\n");
+			}
+			if (g_inputSwallow && !anyInput) g_inputSwallow = false;
+			inputBlocked = g_screenBlank || g_inputSwallow;
+			updateBacklight();
+		}
+		if (inputBlocked) kDown = 0;
+
 		// Music player overlay: it takes the buttons/touches it uses; the rest continue below
 		ui::Result uiRes;
 		{
@@ -1605,10 +1790,10 @@ int main(int argc, char* argv[]) {
 			lastUiTicks = nowUiTicks;
 			for (const auto& m : uiMap) {
 				if (kDown & m.pad) uin.down |= m.ui;
-				if (kHeld & m.pad) uin.held |= m.ui;
+				if (!inputBlocked && (kHeld & m.pad)) uin.held |= m.ui;
 			}
 			HidTouchScreenState uiTouch = {};
-			hidGetTouchScreenStates(&uiTouch, 1);
+			if (!inputBlocked) hidGetTouchScreenStates(&uiTouch, 1);
 			if (uiTouch.count > 0) {
 				uin.touching = true;
 				uin.touchX = (float)uiTouch.touches[0].x;
@@ -1731,8 +1916,9 @@ int main(int argc, char* argv[]) {
 			lastCamTicks = nowCam;
 
 			HidAnalogStickState stick = padGetStickPos(&pad, 1); // right stick
+			if (inputBlocked) { stick.x = 0; stick.y = 0; }
 			const s32 DEAD = 18000;
-			const u64 kHeld = padGetButtons(&pad);
+			const u64 kHeld = inputBlocked ? 0 : padGetButtons(&pad);
 			const bool lookHeld = (kHeld & HidNpadButton_ZL) != 0;
 			const bool matHeld  = (kHeld & HidNpadButton_ZR) != 0;
 
@@ -1801,7 +1987,7 @@ int main(int argc, char* argv[]) {
 		static bool wasTouching = false;
 		{
 			HidTouchScreenState touch = {};
-			hidGetTouchScreenStates(&touch, 1);
+			if (!inputBlocked) hidGetTouchScreenStates(&touch, 1);
 			if (touch.count > 0 && !uiRes.consumedTouch) {
 				float tx = (float)touch.touches[0].x;
 				float ty = 720.0f - (float)touch.touches[0].y;
@@ -1877,11 +2063,11 @@ int main(int argc, char* argv[]) {
 				lastShaderChange = SDL_GetTicks();
 			}
 			const bool previewing = ui::shaderPreviewActive(); // (the Shaders page is trying shaders)
-			const bool autoOn = autoSecs > 0 && shaderFiles.size() > 1 && !previewing;
+			const bool autoOn = autoSecs > 0 && shaderFiles.size() > 1 && !previewing && !g_screenBlank; // (nothing changes while the screen is black)
 			const Uint32 intervalMs = (Uint32)autoSecs * 1000u;
 			const Uint32 elapsedMs = SDL_GetTicks() - lastShaderChange;
 			// Smooth changes (Settings: "Smooth shader changes"): next / previous shader prepared early, automatic changes fade
-			const bool smoothOn = !shaderFiles.empty() && !previewing && player::configInt("shader_fade", 1) != 0 && ensureFadeResources();
+			const bool smoothOn = !shaderFiles.empty() && !previewing && !g_screenBlank && player::configInt("shader_fade", 1) != 0 && ensureFadeResources();
 			const bool smoothAuto = smoothOn && autoOn && intervalMs >= 10000u;
 			if (!smoothOn) { prepFree(g_prepNext); prepFree(g_prepPrev); }
 			if (!smoothAuto) fadeFinish(); // (a fade in progress is finished, not thrown away)
@@ -1957,7 +2143,7 @@ int main(int argc, char* argv[]) {
 
 		// Process audio data
 		computeFFT();
-		uploadAudioTextures();
+		if (!g_screenBlank) uploadAudioTextures();
 
 		// Debug output every 5 seconds
 		if (frameCount % 300 == 0) {
@@ -1971,44 +2157,53 @@ int main(int argc, char* argv[]) {
 		const float frameDt = time - prevTime;
 		prevTime = time;
 
-		if (g_fade.stage == Fade::FADING) { // cross-fading from the old shader to the new one
-			const float p = (SDL_GetTicks() - g_fade.fadeStart) / (float)FADE_MS;
-			if (p >= 0.5f && !g_fade.directivesApplied) fadeApplyDirectives(); // scroller / model / audio flags of the new shader
-			if (p >= 1.0f) fadeFinish();
-			else drawFadeFrame(p, shader, time, frameDt, frameCount, mouse, vbo);
+		if (g_screenBlank) { // idle: black picture, nothing else is drawn
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glViewport(0, 0, g_screenW, g_screenH);
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		}
-		if (g_fade.stage != Fade::FADING) {
-			drawShaderPass(shader, g_img, time, frameDt, frameCount, mouse, vbo);
-		}
+		else {
+			if (g_fade.stage == Fade::FADING) { // cross-fading from the old shader to the new one
+				const float p = (SDL_GetTicks() - g_fade.fadeStart) / (float)FADE_MS;
+				if (p >= 0.5f && !g_fade.directivesApplied) fadeApplyDirectives(); // scroller / model / audio flags of the new shader
+				if (p >= 1.0f) fadeFinish();
+				else drawFadeFrame(p, shader, time, frameDt, frameCount, mouse, vbo);
+			}
+			if (g_fade.stage != Fade::FADING) {
+				drawShaderTo(0, g_screenW, g_screenH, shader, g_img, time, frameDt, frameCount, mouse, vbo);
+			}
 
-		// 3D model layer (on top of the background shader, under the scroller)
-		{
-			float bass = 0.0f, mid = 0.0f, treble = 0.0f;
-			const int half = FFT_SIZE / 2;
-			for (int b = 1; b <= 6 && b < half; b++) bass += audioSpectrum[b];
-			bass = fminf(1.0f, bass / 3.0f);
-			for (int b = 8; b <= 24 && b < half; b++) mid += audioSpectrum[b];
-			mid = fminf(1.0f, mid / 8.0f);
-			for (int b = 28; b <= 48 && b < half; b++) treble += audioSpectrum[b];
-			treble = fminf(1.0f, treble / 10.0f);
-			model3d::draw(time, bass, mid, treble);
-		}
+			// 3D model layer (on top of the background shader, under the scroller)
+			{
+				float bass = 0.0f, mid = 0.0f, treble = 0.0f;
+				const int half = FFT_SIZE / 2;
+				for (int b = 1; b <= 6 && b < half; b++) bass += audioSpectrum[b];
+				bass = fminf(1.0f, bass / 3.0f);
+				for (int b = 8; b <= 24 && b < half; b++) mid += audioSpectrum[b];
+				mid = fminf(1.0f, mid / 8.0f);
+				for (int b = 28; b <= 48 && b < half; b++) treble += audioSpectrum[b];
+				treble = fminf(1.0f, treble / 10.0f);
+				model3d::draw(time, bass, mid, treble);
+			}
 
-		// Sinus scroller overlay
-		if (g_scrollerEnabled && scroller_ready()) {
-			static Uint32 lastScrollTicks = SDL_GetTicks();
-			const Uint32 nowTicks = SDL_GetTicks();
-			const float sdt = (nowTicks - lastScrollTicks) / 1000.0f;
-			lastScrollTicks = nowTicks;
-			float bass = 0.0f; // low spectrum bins -> 0..1
-			for (int b = 1; b <= 4; b++) bass += audioSpectrum[b];
-			bass = fminf(1.0f, bass); // (sum of 4 bins == average * 4)
-			scroller_update(sdt, wasTouching, mouse[0], 720.0f - mouse[1], bass);
-			scroller_draw();
-		}
+			// Sinus scroller overlay
+			if (g_scrollerEnabled && scroller_ready()) {
+				static Uint32 lastScrollTicks = SDL_GetTicks();
+				const Uint32 nowTicks = SDL_GetTicks();
+				const float sdt = (nowTicks - lastScrollTicks) / 1000.0f;
+				lastScrollTicks = nowTicks;
+				float bass = 0.0f; // low spectrum bins -> 0..1
+				for (int b = 1; b <= 4; b++) bass += audioSpectrum[b];
+				bass = fminf(1.0f, bass); // (sum of 4 bins == average * 4)
+				scroller_update(sdt, wasTouching, mouse[0], 720.0f - mouse[1], bass);
+				scroller_draw();
+			}
 
-		// Music player overlay (drawn last, on top of the shader and the scroller)
-		ui::draw();
+			// Music player overlay (drawn last, on top of the shader and the scroller)
+			ui::draw();
+
+		}
 
 		GLenum error = glGetError();
 		if (error != GL_NO_ERROR) {
@@ -2018,7 +2213,7 @@ int main(int argc, char* argv[]) {
 		SDL_GL_SwapWindow(window);
 
 		// Small delay to prevent excessive CPU usage
-		SDL_Delay(16);
+		SDL_Delay(g_screenBlank ? 100 : 16); // (a black screen does not need 60 frames a second)
 	}
 
 	// Cleanup
@@ -2026,6 +2221,8 @@ int main(int argc, char* argv[]) {
 		turn_led_off();
 	}
 	// Reset when done
+	if (g_backlightOff) setBacklight(true); // never leave the screen dark
+	if (g_lblReady) lblExit();
 	appletSetMediaPlaybackState(false); //allow switch to go back to sleep
 	saveVisualState(shaderFiles, currentShader);
 	ui::shutdown();
